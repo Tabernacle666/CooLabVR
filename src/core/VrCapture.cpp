@@ -27,6 +27,9 @@ struct VrCapture::Impl {
         if(n&&n<std::size(path))fallbackDirectory=std::filesystem::path(path).parent_path()/L"Captures";
         n=GetEnvironmentVariableW(L"LOCALAPPDATA",path,DWORD(std::size(path)));
         if(n&&n<std::size(path))directory=std::filesystem::path(path)/L"ConsoleVR"/L"Captures";
+        // Explicit per-run destination, used only when a diagnostic launcher opts in.
+        n=GetEnvironmentVariableW(L"CONSOLEVR_CAPTURE_DIR",path,DWORD(std::size(path)));
+        if(n&&n<std::size(path))directory=std::filesystem::path(path);
         if(directory.empty())directory=fallbackDirectory;
         worker=std::thread([this]{Run();});
     }

@@ -1,54 +1,53 @@
-# ConsoleVR — cycle de trois caméras virtuelles (casque immobile)
+# CooLabVR — diagnostic automatique (2 angles, casque sur la table)
 
-Commande depuis `ConsoleVR` sous Windows avec le casque allumé et une session OpenXR active :
+Depuis Windows, casque allumé, session OpenXR active :
 
 ```bat
 diagnostic_cycle.bat
 ```
 
-Le casque **reste sur la table** : aucune rotation, translation, ni marche de l'utilisateur n'est requise. Le rendu 3D est automatiquement pris à **trois positions virtuelles à des hauteurs différentes**, avec leurs cibles propres et leur perspective stéréo.
+Le programme charge le laboratoire **Home** avec les conditions de comparaison :
+- intérieur sombre (« nuit » de la scène, sans horloge jour/nuit dans cette version) et lampe allumée ;
+- terminal **ambre** (thème 1), face extérieure ;
+- fog activé (densité au moins 0,065) ;
+- exactement **500 mouches**, même si le profil utilisateur en avait un nombre différent.
 
-## Trois points de vue configurables
+Ces valeurs sont appliquées **seulement pendant le diagnostic**, après lecture du profil, sans sauvegarder ni remplacer les réglages normaux.
 
-Fichier `tools/diagnostic_cameras.csv` (les 3 entrées sont éditables sans recompiler ; le fichier est copié dans chaque dossier de résultats) :
+## Séquence
 
-```csv
-name,x,y,z,target_x,target_y,target_z
-lab_exterior,13,16,-13,0,12,0
-original_option_wall,0,12,7.5,0,11.875,3.96
-lamp_fan_interior,-2.5,12.8,0.0,-0.85,12.2,1.15
+1. Si `build/bin/Release/LaboVR.exe` manque ou si un fichier source/CMake est plus récent, `Build.ps1` lance une compilation incrémentale Release. Sinon la compilation est **ignorée**.
+2. Le jeu démarre en mode `--diagnostic-sweep`. Le casque reste sur la table; le suivi OpenXR doit être actif.
+3. La caméra virtuelle #1 rend l'intérieur (ampoule, ventilateur, table, brouillard) pendant **au moins trois secondes**, puis demande une capture de l'œil gauche incluant l'interface.
+4. Après confirmation de la première capture, la caméra virtuelle #2 vise le panneau ambre depuis l'extérieur, rend pendant **au moins trois secondes**, puis capture.
+5. Le jeu quitte de lui-même après confirmation des **deux** images ou retourne une erreur en cas d'échec/expiration. Le lanceur convertit les PNG intermédiaires issus du service OpenXR/WIC en **JPEG qualité 92**, puis supprime les PNG intermédiaires si la conversion a réussi.
+
+Les points de vue se règlent **sans recompiler** dans `tools/diagnostic_cameras.csv`. Ils correspondent à la pièce actuelle, construite autour de Y=0..3,8 m : l'ancien CSV Y≈12 visait trop haut.
+
+Résultats locaux dans `diagnostics/runs/<date>_<pid>/` :
+
+```text
+manifest.json
+cycle.txt
+LaboVR_runtime.log
+LaboVR_build.log         (seulement si compilation)
+capture_index.txt
+diagnostic_cameras.csv
+screenshots/
+    01_lamp_fan_interior.jpg
+    02_original_option_wall.jpg
 ```
 
-Coordonnées en mètres du World (Y vertical). Après 1,1 seconde de stabilisation par position, Core demande au service hôte de capturer l'œil gauche. La suivante est sélectionnée **après confirmation PNG enregistré** ; en cas d'échec, trois tentatives maximum par point de vue. Les noms sont `01_lab_exterior.png`, `02_original_option_wall.png`, `03_lamp_fan_interior.png` si les trois captures réussissent.
+Les journaux existants `vr.frame` fournissent le détail par trame; le résumé `sweep.summary` contient nombre de frames, frames suivies, frames soumises, coût CPU moyen et maximal, durée, erreurs et avertissements GPU. Le manifeste distingue `complete: true` des captures manquantes ou d'un arrêt forcé.
 
-## Frontière de l'ABI et intégrité OpenXR
+Le lanceur **ne fait aucun fetch, pull, commit, push ou changement de branche**. Après avoir inspecté les résultats, utiliser GitHub Desktop pour committer et pousser `diagnostics/runs/`, puis partager le résultat. Si le dépôt est public, les captures et les logs publiés seront publics.
 
-Le mode est uniquement activé par `--diagnostic-sweep`. Dans Core, la caméra virtuelle modifie exclusivement `XRFrame.vp`, `XRFrame.inverseVP` et `XRFrame.eyes`, utilisés par le moteur graphique. **`xrLocateViews`, les actions, les coordonnées physiques des contrôleurs, la simulation, les informations publiées aux cartouches et les poses OpenXR de `xrEndFrame` ne sont pas falsifiées.** La capture GPU/WIC utilise le mécanisme hôte déjà existant.
+Options : `diagnostic_cycle.bat -Seconds 90 -Parallel 8` ou `-GpuValidation`. `Seconds` (15..600) est la durée maximale de la séquence de jeu, **pas** le temps affiché par caméra (3 secondes fixes).
 
-Les cartouches ne lisent jamais la swapchain. Le repère temporaire à **(0,Y,0), de Y=0 à Y=4 m** est produit par le WorldEditor et ses services visuels existants, sans collision ni sauvegarde. Une exécution normale de `run.bat` n'active ni le repère ni les vues virtuelles.
+## Frontière XR et limites
 
-Comme les poses utilisées pour le rendu de diagnostic diffèrent des poses physiques présentées au compositeur OpenXR, **ces images sont destinées aux PNG du diagnostic et non à un affichage confortable dans un casque porté**.
+Le diagnostic ne change que les matrices de vue/projection utilisées par le rendu (deux yeux séparés de 64 mm); **les poses de tracking OpenXR, les manettes, la simulation PhysX et les poses soumises au compositeur restent inchangées**. Les captures sont obtenues par le mécanisme hôte GPU readback déjà existant. Les vues sont destinées à la vérification visuelle, pas à un port du casque pendant la procédure.
 
-## Cycle automatisé
+Un casque en veille, un runtime qui refuse le rendu, une défaillance GPU ou une compilation incomplète peuvent empêcher les captures. Dans ce cas, la commande retourne un code d'échec et conserve les preuves disponibles.
 
-Le batch appelle `tools/DiagnosticCycle.ps1` :
-
-1. Vérification des modifications Git locales, puis `git fetch` et `git pull --ff-only origin dev`.
-2. Compilation complète Release avec `tools/Build.ps1`.
-3. Exécution de `LaboVR.exe --diagnostic-sweep 100 --diagnostic-camera-file "…\diagnostic_cameras.csv"`.
-4. Captures automatiques, fichiers PNG nommés, logs du runtime et du build, `manifest.json`, `capture_index.txt`, positions CSV et `cycle.txt`.
-5. Commit et push **uniquement** du dossier `diagnostics/runs/<session>/` sur `dev`. Aucun reset ni push forcé. Si le build ou le run échoue, les preuves disponibles sont quand même enregistrées.
-
-Options : `diagnostic_cycle.bat -Seconds 120 -Parallel 8` et `-GpuValidation`.
-
-Le cycle se termine dès que les trois captures sont enregistrées ou à expiration du délai prévu. Une expiration supplémentaire du processus protège contre un blocage de la fermeture de laboratoire.
-
-**Conditions réelles :** le casque doit être reconnu par OpenXR, la session doit produire des vues valides et le moteur doit afficher les scènes. Le programme ne peut pas générer une capture correcte si la session XR ne fournit plus de rendu (veille, absence de tracking ou erreur GPU). Les anomalies et captures manquantes figurent dans les logs et le manifeste.
-
-**Confidentialité :** cette commande publie les PNG et journaux sur GitHub ; inspecter la visibilité du dépôt avant utilisation.
-
-Le fonctionnement complet n'est pas encore validé par compilation Windows/MSVC et exécution avec casque.
-
-## Fidélité au laboratoire historique
-
-Le laboratoire est monté à +10 m sur l'axe Y : les anciennes caméras (Y=2–6 visé) photographiaient **sous** le labo. Les caméras visent désormais la pièce à Y≈12, la face historique du terminal **(0,11.875,3.96)** et la zone lampe/ventilateur. La DLL World conserve les comportements d'origine, et le diagnostic n'invente pas de remplacement d'assets. Les logs `terminal.world_probe`, `world.ecosystem_probe` et `audio.world_probe` distinguent présence du code, publications et états réellement actifs. Ce changement est exclusivement un ajustement du canal d'observation, **pas** une correction démontrée des régressions visuelles ou sonores.
+**État de validation :** changements publiés au niveau source seulement. La compilation Windows/MSVC, le rendu OpenXR et le cadrage exact par rapport aux deux images de référence doivent être confirmés sur le PC du créateur; les angles CSV pourront ensuite être ajustés sans recompilation.

@@ -1,5 +1,6 @@
 #include "HomePhysics.h"
 #include "LaboVRVisualService.h"
+#include "LaboVRTerminal.h"
 #include "ClientAssets.h"
 #include "SessionLog.h"
 #include <algorithm>

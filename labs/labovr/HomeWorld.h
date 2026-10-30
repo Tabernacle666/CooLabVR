@@ -61,6 +61,10 @@ public:
     void SetAmbientVisible(bool value){ambientVisible_=value;physics_.SetVisible(value);}
     void SetLampEnabled(bool value){physics_.SetLampEnabled(value);}
     void LoadConfiguration(const std::wstring& path){physics_.LoadConfiguration(path);}
+    void ApplyDiagnosticDefaults(){physics_.ApplyDiagnosticDefaults();BuildPanel();}
+    uint32_t DiagnosticPopulation()const{return physics_.PopulationCount();}
+    const LabFogSettingsV1& DiagnosticFog()const{return physics_.Fog();}
+    uint32_t DiagnosticTheme()const{return physics_.PanelTheme();}
     void SetWorldNames(std::vector<std::string>);
     void Update(const FrameInput&,double,std::span<const SceneLight>);
     HomeCommand ConsumeCommand()noexcept;

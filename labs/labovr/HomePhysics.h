@@ -117,6 +117,8 @@ public:
     bool FanEnabled()const{return fanEnabled_;}float FanRpm()const{return fanRpm_;}float FanActualRpm()const{return fanActualRpm_;}float FanWind()const{return fanWind_;}
     double SimulationSeconds()const{return simulationSeconds_;}
     void LoadConfiguration(const std::wstring&);
+    // Transient diagnostics only: never writes the creator's saved profile.
+    void ApplyDiagnosticDefaults();
     void Load(const LabHostApiV1&,SceneData&);
     void Unload();
     void Update(uint64_t,double,std::span<const SceneLight>);

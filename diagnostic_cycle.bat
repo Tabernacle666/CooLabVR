@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-rem One pass: git fast-forward, Release build, timed OpenXR capture sweep,
-rem then upload this run's PNGs and logs to diagnostics/runs in dev.
+rem Local XR diagnostic: reuse current build, two JPEGs, metrics, then exit.
+rem Does NOT fetch, pull, commit or push. Headset may remain on the table.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\DiagnosticCycle.ps1" %*
 exit /b %errorlevel%
