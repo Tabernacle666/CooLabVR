@@ -166,6 +166,21 @@ void HomePhysics::Build(SceneData& assets){
     Require(physics_->SetPopulationEffects(physics_->serviceContext,scene_,&effects_),"Home physics_v1: population effects rejected");
     flight_.impactSeconds=effects_.fleeSeconds;fog_.lightIndex=lampLight_.sceneLightIndex;Require(gpu_->SetFogSettings(gpu_->serviceContext,&fog_),"Home gpu_v1: volume settings rejected");
 }
+void HomePhysics::ApplyDiagnosticDefaults(){
+    if(!scene_)Fail("Diagnostic defaults require an active Home scene");
+    // Only in-memory state: the user's saved profiles are not modified.
+    panelTheme_=LAB_TERMINAL_THEME_AMBER_V2;
+    panelFace_=0;
+    fog_.enabled=1;
+    if(fog_.density<.06f)fog_.density=.065f;
+    auto volume=fog_;
+    volume.enabled=visible_?1u:0u;
+    Require(gpu_->SetFogSettings(gpu_->serviceContext,&volume),"Home diagnostics: fog settings rejected");
+    AddPopulation(500-int32_t(populationCount_));
+    SetLampEnabled(true);
+    LogEvent(sourceFrame_,"sweep.settings","theme=amber night=dark_room fog_enabled=%u fog_density=%.4f population=%u lamp=%u",
+        fog_.enabled,fog_.density,populationCount_,unsigned(LampEnabled()));
+}
 void HomePhysics::AddPopulation(int32_t delta){
     uint32_t n=uint32_t(std::clamp(int64_t(populationCount_)+delta,int64_t(0),int64_t(LAB_PHYSICS_POPULATION_MAX_V1)));
     Require(physics_->SetPopulationCount(physics_->serviceContext,scene_,n),"Home physics_v1: population batch rejected");
