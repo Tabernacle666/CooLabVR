@@ -183,3 +183,17 @@ ligne `physics.profile.motor` donne `writes` et `unchanged_skips`.
 Les six lignes `physics.profile.*` sont requises dans le manifeste.
 Cette optimisation évite des modifications de contraintes inutiles, mais
 le gain GPU/CPU doit être évalué sur le prochain diagnostic Windows.
+
+
+### Essai de coût des itérations du solveur PhysX GPU
+
+À l'origine chaque corps dynamique utilise `12` itérations de position et
+`4` de vitesse. Un essai conservateur passe à `10` et `3`, sans
+modifier le pas de 120 Hz, les contraintes D6, les collisions ni le rendu.
+Ce n'est **pas** un gain validé : comparer `physics.profile.gpu`,
+`physics.profile.wait` et `sweep.cpu` aux diagnostics précédents.
+`physics.profile.solver` enregistre le réglage effectif, le nombre de
+corps dynamiques, les joints et l'état de mise en veille. Surveiller le
+comportement de la suspension et du ventilateur ; rétablir 12/4 si
+l'amélioration est absente ou si la stabilité physique diminue.
+Sept lignes `physics.profile.*` sont requises dans le manifeste.

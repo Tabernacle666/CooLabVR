@@ -22,6 +22,11 @@
 namespace lab {
 using namespace physx;
 namespace {
+// Controlled PhysX GPU solver experiment. Baseline was 12/4; 10/3 keeps
+// substantially more iterations than the conventional 4/1 defaults while
+// testing whether excessive constraint solve work contributes to GPU latency.
+constexpr PxU32 SolverPositionIterations=10;
+constexpr PxU32 SolverVelocityIterations=3;
 void Cuda(cudaError_t result,const char* operation){if(result!=cudaSuccess){char message[512];snprintf(message,sizeof(message),"PhysX CUDA: %s: %s",operation,cudaGetErrorString(result));Fail(message);}}
 void Driver(CUresult result,const char* operation){if(result!=CUDA_SUCCESS){const char* error{};cuGetErrorString(result,&error);char message[512];snprintf(message,sizeof(message),"PhysX CUDA driver: %s: %s",operation,error?error:"unknown");Fail(message);}}
 void Gpu(bool result,const char* operation){if(!result)Fail(operation);}
@@ -246,6 +251,12 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
             static_cast<unsigned long long>(p.motorWrites),
             static_cast<unsigned long long>(p.motorUnchangedSkips),
             static_cast<unsigned long long>(p.motorWrites+p.motorUnchangedSkips));
+        const uint32_t activeJoints=uint32_t(std::count_if(joints.begin(),joints.end(),
+            [](const Joint& j){return j.joint!=nullptr;}));
+        LogEvent(0,"physics.profile.solver",
+            "position_iterations=%u velocity_iterations=%u dynamic_bodies=%u joint_count=%u sleeping_disabled=%u",
+            unsigned(SolverPositionIterations),unsigned(SolverVelocityIterations),dynamicCount,
+            activeJoints,unsigned(scene->getFlags().isSet(PxSceneFlag::eDISABLE_SLEEPING)));
         const uint64_t forceSteps=p.deviceZeroSteps+p.hostUploadSteps;
         LogEvent(0,"physics.profile.transfer",
             "device_zero_steps=%llu host_upload_steps=%llu active_force_steps=%llu force_init_submit_avg_ms=%.4f",
@@ -300,7 +311,7 @@ uint32_t PhysicsRuntime::Impl::Scene::CreateBody(const LabPhysicsBodyDescV1& d,L
     shape->setLocalPose(P(d.shapePose));shape->setContactOffset(d.contactOffset);shape->setRestOffset(d.restOffset);shape->setSimulationFilterData(PxFilterData(d.layer,d.collisionMask,d.collisionGroup,0));
     if(d.kind==LAB_PHYSICS_STATIC)b.actor=runtime.physics->createRigidStatic(b.initial);else b.actor=runtime.physics->createRigidDynamic(b.initial);
     if(!b.actor){shape->release();if(b.convex)b.convex->release();b.material->release();return 0;}b.actor->attachShape(*shape);shape->release();
-    if(d.kind!=LAB_PHYSICS_STATIC){auto* dynamic=static_cast<PxRigidDynamic*>(b.actor);Gpu(PxRigidBodyExt::setMassAndUpdateInertia(*dynamic,d.mass),"PhysX: failed body inertia calculation");if(d.inertia.x>0&&d.inertia.y>0&&d.inertia.z>0&&Valid(d.inertia))dynamic->setMassSpaceInertiaTensor(V(d.inertia));dynamic->setLinearDamping(d.linearDamping);dynamic->setAngularDamping(d.angularDamping);dynamic->setMaxAngularVelocity(d.maxAngularVelocity>0?d.maxAngularVelocity:200.f);dynamic->setSolverIterationCounts(12,4);dynamic->setSleepThreshold(0);if(b.kinematic)dynamic->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC,true);}
+    if(d.kind!=LAB_PHYSICS_STATIC){auto* dynamic=static_cast<PxRigidDynamic*>(b.actor);Gpu(PxRigidBodyExt::setMassAndUpdateInertia(*dynamic,d.mass),"PhysX: failed body inertia calculation");if(d.inertia.x>0&&d.inertia.y>0&&d.inertia.z>0&&Valid(d.inertia))dynamic->setMassSpaceInertiaTensor(V(d.inertia));dynamic->setLinearDamping(d.linearDamping);dynamic->setAngularDamping(d.angularDamping);dynamic->setMaxAngularVelocity(d.maxAngularVelocity>0?d.maxAngularVelocity:200.f);dynamic->setSolverIterationCounts(SolverPositionIterations,SolverVelocityIterations);dynamic->setSleepThreshold(0);if(b.kinematic)dynamic->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC,true);}
     b.handle=(uint64_t(runtime.Generation())<<32)|(slot+1);scene->addActor(*b.actor);bodies[slot]=b;topologyDirty=descriptorsDirty=true;*out=b.handle;return 1;
 }
 uint32_t PhysicsRuntime::Impl::Scene::DestroyBody(LabPhysicsBodyV1 h){
