@@ -30,8 +30,35 @@ if(LAB_CUDART_DLL_COUNT EQUAL 0)
 endif()
 list(GET LAB_CUDART_DLLS 0 LAB_CUDART_DLL)
 include(FetchContent)
-# Reuse populated FetchContent trees during iterative development; first configure still downloads missing dependencies.
-set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Do not update already-populated dependencies during normal builds" FORCE)
+# Provision dependencies only when needed. The less strict
+# FETCHCONTENT_UPDATES_DISCONNECTED does not disable URL downloads.
+# On a previously completed configure, bypass *all* download/update/patch
+# steps if every pinned source tree is present. This is particularly important
+# for the large PhysX archive and the Windows Release iteration cycle.
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Do not update fetched Git dependencies" FORCE)
+option(LABOVR_REFRESH_DEPENDENCIES "Explicitly re-fetch third-party dependencies (turn OFF again afterwards)" OFF)
+set(_lab_vendor_packages openxr agility dxc steamaudio pix cgltf physx_lib ktx)
+set(_lab_vendor_complete TRUE)
+foreach(_lab_package IN LISTS _lab_vendor_packages)
+    set(_lab_package_dir "${FETCHCONTENT_BASE_DIR}/${_lab_package}-src")
+    if(NOT IS_DIRECTORY "${_lab_package_dir}")
+        set(_lab_vendor_complete FALSE)
+        break()
+    endif()
+    file(GLOB _lab_package_contents "${_lab_package_dir}/*")
+    if(NOT _lab_package_contents)
+        set(_lab_vendor_complete FALSE)
+        break()
+    endif()
+endforeach()
+if(NOT LABOVR_REFRESH_DEPENDENCIES AND _lab_vendor_complete
+   AND EXISTS "${CMAKE_BINARY_DIR}/CMakeFiles/generate.stamp")
+    set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "Reuse already configured local dependency sources" FORCE)
+    message(STATUS "LaboVR dependencies: reusing cached sources, download disabled")
+else()
+    set(FETCHCONTENT_FULLY_DISCONNECTED OFF CACHE BOOL "Allow missing/explicitly refreshed third-party sources" FORCE)
+    message(STATUS "LaboVR dependencies: initial provisioning or explicit refresh (network permitted)")
+endif()
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
