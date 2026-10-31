@@ -11,7 +11,7 @@
 #include <string>
 namespace lab {
 namespace {
-enum HomePhysicsMesh:uint32_t {Link=3,Socket,Glass,Thorax,Head,Abdomen,Eye,WingLeft,VeinsLeft,WingRight,VeinsRight,Leg,Foot,Antennae,Proxy,MeshEnd};
+enum HomePhysicsMesh:uint32_t {Link=3,Socket,Glass,Thorax,Head,Abdomen,Eye,WingLeft,VeinsLeft,WingRight,VeinsRight,Leg,Foot,Antennae,Proxy,Pot,Rock,MeshEnd};
 constexpr uint32_t RoomLayer=1,ChainLayer=2,InsectLayer=4,HandLayer=8;
 void Require(LabU32 result,const char* operation){if(!result)Fail(operation);}
 LabVec3V1 V(XMFLOAT3 v){return {v.x,v.y,v.z};}
@@ -41,7 +41,7 @@ void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
     input_=static_cast<const LabInputServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_INPUT_V1,1));
     audio_=static_cast<const LabAudioServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_AUDIO_V1,1));
     gpu_=static_cast<const LabGpuServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_GPU_V1,1));
-    if(!storage_||storage_->structSize<sizeof(*storage_)||!physics_||physics_->version!=1||physics_->structSize<sizeof(*physics_)||!physics_->CreatePopulation||!physics_->PollPopulation||!physics_->SetPopulationEffects||!physics_->SetPopulationHands||!physics_->SetBodyCollisionEnabled||!input_||input_->structSize<sizeof(*input_)||!input_->GetPhysicalSources||!input_->SetBooleanSources||!audio_||audio_->structSize<sizeof(*audio_)||!audio_->SetAcousticBoxes||!gpu_||gpu_->structSize<sizeof(*gpu_)||!gpu_->SetFogSettings||!gpu_->SetFogInput||!gpu_->SetPopulationOpticalSettings||!gpu_->RequestCapture||!gpu_->GetCaptureStatus||!gpu_->SetAntialiasing||!gpu_->SetFogTransport||!gpu_->SetSurfaceSettings||!gpu_->SetMultisampling||!physics_->SetAirflows||!physics_->SetPopulationSpace)Fail("Home requires SDK physics_v1/input_v1/audio_v1/gpu_v1");
+    if(!storage_||storage_->structSize<sizeof(*storage_)||!physics_||physics_->version!=1||physics_->structSize<sizeof(*physics_)||!physics_->CreatePopulation||!physics_->PollPopulation||!physics_->SetPopulationEffects||!physics_->SetPopulationHands||!physics_->SetBodyCollisionEnabled||!physics_->SetBodySpeculativeCCD||!input_||input_->structSize<sizeof(*input_)||!input_->GetPhysicalSources||!input_->SetBooleanSources||!audio_||audio_->structSize<sizeof(*audio_)||!audio_->SetAcousticBoxes||!gpu_||gpu_->structSize<sizeof(*gpu_)||!gpu_->SetFogSettings||!gpu_->SetFogInput||!gpu_->SetPopulationOpticalSettings||!gpu_->RequestCapture||!gpu_->GetCaptureStatus||!gpu_->SetAntialiasing||!gpu_->SetFogTransport||!gpu_->SetSurfaceSettings||!gpu_->SetMultisampling||!physics_->SetAirflows||!physics_->SetPopulationSpace)Fail("Home requires SDK physics_v1/input_v1/audio_v1/gpu_v1");
     // Bound GPU PhysX synchronization to at most two fixed steps per rendered
     // frame. An 8 x 240 Hz catch-up loop can amplify frame overruns: each
     // substep blocks on fetchResults(), then the next frame tries to catch up.
@@ -63,7 +63,7 @@ void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
 void HomePhysics::Unload(){
     if(!scene_)return;auto opticalOff=optical_;opticalOff.enabled=0;gpu_->SetPopulationOpticalSettings(gpu_->serviceContext,&opticalOff);audio_->SetAcousticBoxes(audio_->serviceContext,nullptr,0);auto off=fog_;off.enabled=0;Require(gpu_->SetFogSettings(gpu_->serviceContext,&off),"Home gpu_v1: volume detach rejected");Require(gpu_->SetPublicationProvider(gpu_->serviceContext,nullptr),"Home gpu_v1: detach failed");
     LabAudioEmitterBatchV1 silence{1,sizeof(silence),0,nullptr,0,0};Require(audio_->PublishEmitters(audio_->serviceContext,&silence),"Home audio_v1: emitter detach failed");Require(physics_->DestroyScene(physics_->serviceContext,scene_),"Home physics_v1: scene destruction failed");
-    entities_.clear();connections_.clear();selections_.clear();scene_=0;hands_={};grips_={};handTracked_={};handColliding_={};provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
+    entities_.clear();connections_.clear();selections_.clear();scene_=0;fanBodies_={};fanCcd_=false;hands_={};grips_={};handTracked_={};handColliding_={};provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
 }
 void HomePhysics::SetVisible(bool visible){
     visible_=visible;PublishAcoustics();PublishOptical();
@@ -80,6 +80,14 @@ void HomePhysics::SetLampEnabled(bool value){
     Require(physics_->SetVisuals(physics_->serviceContext,scene_,visuals_.data(),uint32_t(visuals_.size()),&lampLight_,1),"Home physics_v1: lamp state update rejected");
     LogEvent(sourceFrame_,"home.lamp","enabled=%u power=%.1f material=%u body=%llu",unsigned(value),lampPower_,uint32_t(value?Material::Bulb:Material::Charcoal),static_cast<unsigned long long>(bulb_));
 }
+void HomePhysics::ToggleFanCCD(){
+    if(!scene_)return;
+    bool enabled=!fanCcd_;
+    for(auto body:fanBodies_)Require(physics_->SetBodySpeculativeCCD(physics_->serviceContext,scene_,body,enabled?1u:0u),
+        "Home physics_v1: fan CCD toggle rejected");
+    fanCcd_=enabled;status_=enabled?"FAN CCD ON":"FAN CCD OFF";
+    LogEvent(sourceFrame_,"home.fan.ccd","enabled=%u",unsigned(fanCcd_));
+}
 void HomePhysics::Build(SceneData& assets){
     SceneData meshAssets;meshAssets.meshes=LoadGLTF(AssetPath(L"assets/home_physics.gltf"));if(meshAssets.meshes.ranges.size()!=MeshEnd-uint32_t(Mesh::Count))Fail("Home physical mesh library mismatch");AppendClientScene(assets,meshAssets);
     auto& m=assets.materials;
@@ -91,7 +99,12 @@ void HomePhysics::Build(SceneData& assets){
     m[uint32_t(Material::Gun)]={{.16f,.009f,.013f,.20f},{0,0,0,.18f}};
     m[uint32_t(Material::Glue)]={{.20f,.26f,.32f,.25f},{0,0,0,.60f}};
     m[uint32_t(Material::Charcoal)]={{.008f,.012f,.010f,.55f},{0,0,0,.15f}};
+    m[uint32_t(Material::Terracotta)]={{.36f,.13f,.065f,.92f},{0,0,0,0}};
+    m[uint32_t(Material::Rock)]={{.27f,.28f,.29f,.97f},{0,0,0,0}};
+    m[uint32_t(Material::Bark)]={{.13f,.067f,.031f,.96f},{0,0,0,0}};
+    m[uint32_t(Material::Leaves)]={{.035f,.16f,.044f,.89f},{0,0,0,0}};
     m[uint32_t(Material::Glue)].doubleSided=1;
+    m[uint32_t(Material::Terracotta)].doubleSided=1;
     // Room colliders are exactly the visible room boxes, not a second hidden
     // boundary. Their dimensions and material response use the public ABI.
     const char* roomNames[]{"Floor","Ceiling","Wall -Z","Wall -X","Wall +X"};
@@ -151,23 +164,72 @@ void HomePhysics::Build(SceneData& assets){
     Joint(Connection(previous,pullHandle_,PoseAt({0,-chainPitch*.5f,0}),PoseAt({0,.025f,0}),true));
 
     buildingGroup_=4;
-    auto baseDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.55f,1.35f},{.215f,.025f,.17f},2.f,RoomLayer);baseDesc.shapePose.position={0,-.4f,0};baseDesc.reserved[0]=LAB_PHYSICS_BODY_SPECULATIVE_CCD;baseDesc.collisionGroup=0x500u;fanBase_=Body(baseDesc);entities_.back().id="fan-base";entities_.back().name="Fan stand / housing";
+    auto baseDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.55f,1.35f},{.215f,.025f,.17f},2.f,RoomLayer);baseDesc.shapePose.position={0,-.4f,0};baseDesc.contactOffset=.012f;baseDesc.collisionGroup=0x500u;fanBase_=Body(baseDesc);entities_.back().id="fan-base";entities_.back().name="Fan stand / housing";fanBodies_[0]=fanBase_;
     Visual(fanBase_,uint32_t(Mesh::Cylinder),Material::Steel,{.43f,.05f,.34f},PoseAt({0,-.4f,0}));
     Visual(fanBase_,uint32_t(Mesh::Box),Material::Steel,{.055f,.65f,.055f},PoseAt({0,-.06f,.08f}));
     Visual(fanBase_,uint32_t(Mesh::Cylinder),Material::Charcoal,{.44f,.06f,.44f},PoseAt({0,.32f,.055f},Rotation(XM_PIDIV2,0,0)));
-    auto fanPart=[&](const char* id,const char* name,XMFLOAT3 offset,XMFLOAT3 halfExtent,float mass){
+    auto fanPart=[&](uint32_t slot,const char* id,const char* name,XMFLOAT3 offset,XMFLOAT3 halfExtent,float mass){
         auto d=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,Add({-.85f,1.55f,1.35f},offset),halfExtent,mass,RoomLayer);
-        d.collisionGroup=0x500u;d.reserved[0]=LAB_PHYSICS_BODY_SPECULATIVE_CCD;
+        d.collisionGroup=0x500u;
         auto part=Body(d);entities_.back().id=id;entities_.back().name=name;
+        fanBodies_[slot]=part;
         Joint(Connection(fanBase_,part,PoseAt(offset),PoseAt({0,0,0}),false));
     };
-    fanPart("fan-post-collider","Fan post",{0,-.06f,.08f},{.0275f,.325f,.0275f},.3f);
-    fanPart("fan-head-collider","Fan housing",{0,.32f,.055f},{.22f,.22f,.03f},.5f);
-    auto rotorDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.87f,1.27f},{.17f,.025f,.009f},.06f,ChainLayer);rotorDesc.collisionMask=RoomLayer|HandLayer;rotorDesc.collisionGroup=0x500u;rotorDesc.reserved[0]=LAB_PHYSICS_BODY_SPECULATIVE_CCD;rotorDesc.angularDamping=.003f;rotorDesc.inertia={.0003f,.0003f,.0006f};fanRotor_=Body(rotorDesc);entities_.back().id="fan-rotor";entities_.back().name="Fan rotor / blades";
+    fanPart(1,"fan-post-collider","Fan post",{0,-.06f,.08f},{.0275f,.325f,.0275f},.3f);
+    fanPart(2,"fan-head-collider","Fan housing",{0,.32f,.055f},{.22f,.22f,.03f},.5f);
+    auto rotorDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.87f,1.27f},{.17f,.025f,.009f},.06f,ChainLayer);rotorDesc.collisionMask=RoomLayer|HandLayer;rotorDesc.collisionGroup=0x500u;rotorDesc.angularDamping=.003f;rotorDesc.inertia={.0003f,.0003f,.0006f};fanRotor_=Body(rotorDesc);entities_.back().id="fan-rotor";entities_.back().name="Fan rotor / blades";fanBodies_[3]=fanRotor_;
     for(uint32_t blade=0;blade<3;blade++){float angle=blade*XM_2PI/3;auto q=Rotation(0,0,angle);Visual(fanRotor_,uint32_t(Mesh::Box),Material::Steel,{.07f,.18f,.014f},PoseAt(Rotated({0,.10f,0},q),q));}
     Visual(fanRotor_,uint32_t(Mesh::Sphere),Material::Charcoal,{.06f,.06f,.04f});
     auto axle=Connection(fanBase_,fanRotor_,PoseAt({0,.32f,-.08f},Rotation(0,XM_PIDIV2,0)),PoseAt({0,0,0},Rotation(0,XM_PIDIV2,0)),false);
     axle.motion[3]=LAB_PHYSICS_FREE;axle.drive[LAB_PHYSICS_DRIVE_TWIST]={0,.002f,.025f,0};fanJoint_=Joint(axle);
+    // Hollow, movable pot: one heavy base plus twelve fixed, non-colliding
+    // wall sections. Only the rim is open; neither contents nor tree are jointed.
+    buildingGroup_=5;
+    const XMFLOAT3 potOrigin{-.44f,1.135f,1.15f};
+    auto potDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,potOrigin,{.073f,.012f,.073f},.30f,RoomLayer);
+    potDesc.collisionGroup=0x600u;potDesc.staticFriction=.9f;
+    auto pot=Body(potDesc);entities_.back().id="vase-base";entities_.back().name="Terracotta vase";
+    Visual(pot,Pot,Material::Terracotta,{1,1,1},PoseAt({0,-.003f,0}));
+    constexpr uint32_t wallCount=12;
+    for(uint32_t i=0;i<wallCount;i++){
+        float angle=XM_2PI*float(i)/float(wallCount);
+        XMFLOAT3 offset{.095f*std::cos(angle),.092f,.095f*std::sin(angle)};
+        auto q=Rotation(0,XM_PIDIV2-angle,0);
+        auto wall=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,Add(potOrigin,offset),{.028f,.087f,.011f},.035f,RoomLayer);
+        wall.pose.orientation=q;wall.collisionGroup=0x600u;wall.staticFriction=.9f;
+        auto part=Body(wall);entities_.back().id="vase-wall-"+std::to_string(i);entities_.back().name="Vase wall "+std::to_string(i+1);
+        Joint(Connection(pot,part,PoseAt(offset,q),PoseAt({0,0,0}),false));
+    }
+    // Five spaced rings of eight independent, slightly asymmetric convex prisms.
+    // The vertex array is borrowed only for synchronous PhysX cooking.
+    buildingGroup_=6;
+    for(uint32_t i=0;i<40;i++){
+        uint32_t row=i/8,col=i%8;float angle=XM_2PI*(float(col)+.25f*float(row&1))/8.f;
+        XMFLOAT3 center{potOrigin.x+.049f*std::cos(angle),1.161f+.025f*float(row),potOrigin.z+.049f*std::sin(angle)};
+        float width=.012f+.001f*float(i%3),depth=.012f+.001f*float((i+1)%3);
+        std::array<LabVec3V1,8> vertices{};
+        for(uint32_t k=0;k<8;k++){
+            float x=(k&1)?width:-width,z=(k&2)?depth:-depth;
+            vertices[k]={x*(1.f+.12f*std::sin(float(i*7+k*3))),k<4?-.009f:.009f,
+                z*(1.f+.10f*std::cos(float(i*11+k*5)))};
+        }
+        auto rock=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_CONVEX,center,{.016f,.010f,.016f},.045f,RoomLayer);
+        rock.convexVertices=vertices.data();rock.convexVertexCount=uint32_t(vertices.size());rock.staticFriction=.8f;rock.dynamicFriction=.65f;rock.restitution=.02f;
+        auto body=Body(rock);entities_.back().id="vase-rock-"+std::to_string(i);entities_.back().name="Grey rock "+std::to_string(i+1);
+        Visual(body,Rock,Material::Rock,{width,.011f,depth});
+    }
+    buildingGroup_=7;
+    auto tree=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_SPHERE,{potOrigin.x,1.320f,potOrigin.z},{.045f,0,0},.006f,RoomLayer);
+    tree.staticFriction=.85f;tree.angularDamping=.30f;
+    auto bonsai=Body(tree);entities_.back().id="vase-bonsai";entities_.back().name="Bonsai tree";
+    Visual(bonsai,uint32_t(Mesh::Sphere),Material::Bark,{.075f,.045f,.075f});
+    Visual(bonsai,uint32_t(Mesh::Cylinder),Material::Bark,{.019f,.22f,.019f},PoseAt({0,.095f,0}));
+    for(uint32_t i=0;i<5;i++){
+        float a=XM_2PI*float(i)/5.f;XMFLOAT3 branch{.055f*std::cos(a),.18f+.025f*float(i%2),.055f*std::sin(a)};
+        Visual(bonsai,uint32_t(Mesh::Cylinder),Material::Bark,{.012f,.10f,.012f},PoseAt(Scale(branch,.5f),Rotation(0,a,-.65f)));
+        Visual(bonsai,uint32_t(Mesh::Sphere),Material::Leaves,{.075f,.045f,.070f},PoseAt(branch));
+    }
+    Visual(bonsai,uint32_t(Mesh::Sphere),Material::Leaves,{.065f,.075f,.065f},PoseAt({0,.25f,0}));
     // IDs of constraints refer to their declared body relation, not allocation order.
     buildingGroup_=0;
     optical_.lightIndex=lampLight_.sceneLightIndex;

@@ -124,6 +124,29 @@ for k in range(3,len(meshes)):
     name,vertices,indices=meshes[k]
     factor=.004375 if name=='PopulationProxy' else .003
     meshes[k]=(name,[(tuple(x*factor for x in p),n,uv) for p,n,uv in vertices],indices)
+
+# The pot remains hollow: the inside surface and the open rim are visible.
+# Its separate PhysX wall segments are attached to the same moving base.
+meshes.append(lathe('OpenTerracottaPot',[
+    (0,0), (0,.071), (.014,.082), (.155,.105), (.18,.112),
+    (.18,.092), (.155,.084), (.020,.064), (.017,0)]))
+
+def faceted_rock():
+    points=[(-.85,-.7,-.60),(.72,-.75,-.78),(1.0,-.62,.58),(-.63,-.7,.86),
+            (-.68,.64,-.48),(.58,.75,-.56),(.78,.52,.40),(-.53,.66,.65)]
+    faces=[(0,2,1),(0,3,2),(4,5,6),(4,6,7),
+           (0,1,5),(0,5,4),(1,2,6),(1,6,5),
+           (2,3,7),(2,7,6),(3,0,4),(3,4,7)]
+    vertices,indices=[],[]
+    for face in faces:
+        a,b,c=(points[k] for k in face)
+        u=tuple(b[i]-a[i] for i in range(3))
+        v=tuple(c[i]-a[i] for i in range(3))
+        n=norm((u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]))
+        for p in (a,b,c):
+            indices.append(len(vertices));vertices.append((p,n,(0,0)))
+    return 'FacetedRock',vertices,indices
+meshes.append(faceted_rock())
 data, views, accessors, output = bytearray(), [], [], []
 def add(values, fmt, kind, component, bounds=False):
     while len(data)%4:data.append(0)

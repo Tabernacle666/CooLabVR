@@ -172,6 +172,7 @@ struct PhysicsRuntime::Impl {
         Joint* FindJoint(LabPhysicsJointV1 h){uint32_t i=uint32_t(h)-1;return h&&i<joints.size()&&joints[i].handle==h&&joints[i].joint?&joints[i]:nullptr;}
         uint32_t CreateBody(const LabPhysicsBodyDescV1&,LabPhysicsBodyV1*);uint32_t DestroyBody(LabPhysicsBodyV1);
         uint32_t SetBodyCollisionEnabled(LabPhysicsBodyV1,bool);
+        uint32_t SetBodySpeculativeCCD(LabPhysicsBodyV1,bool);
         uint32_t CreateD6(const LabPhysicsD6DescV1&,LabPhysicsJointV1*);uint32_t ConfigureD6(LabPhysicsJointV1,const LabPhysicsD6DescV1&);uint32_t DestroyJoint(LabPhysicsJointV1);
         uint32_t Pause(bool);uint32_t EditSnapshot(LabPhysicsEditSnapshotV1*);uint32_t Edit(const LabPhysicsEditBatchV1&);uint32_t Translate(const LabPhysicsBodyV1*,uint32_t,LabVec3V1);uint32_t ValidateEdit(LabPhysicsEditValidationV1*);void CaptureEditPoses();void WriteEditPoses();void CommitEditPoses();
         void RefreshIndices();void RefreshDescriptors();void ReadState(bool first);void Step(float,uint32_t);void Advance(double,uint64_t);
@@ -299,7 +300,6 @@ uint32_t PhysicsRuntime::Impl::Scene::CreateBody(const LabPhysicsBodyDescV1& d,L
     if(!out||paused&&started)return 0;*out=0;
     if(d.structSize<sizeof(d)||d.kind>LAB_PHYSICS_KINEMATIC||d.shape>LAB_PHYSICS_CONVEX||!Valid(d.pose)||!Valid(d.shapePose)||!Valid(d.dimensions)||d.layer==0||!Finite(d.mass)||!Finite(d.contactOffset)||d.contactOffset<=d.restOffset||d.contactOffset<=0||!Finite(d.staticFriction)||!Finite(d.dynamicFriction)||d.staticFriction<0||d.dynamicFriction<0||!Finite(d.restitution)||d.restitution<0||d.restitution>1||!Finite(d.linearDamping)||!Finite(d.angularDamping)||d.linearDamping<0||d.angularDamping<0)return 0;
     if(d.kind!=LAB_PHYSICS_STATIC&&d.mass<=0)return 0;
-    if(insectCapacity&&d.shape==LAB_PHYSICS_CONVEX)return 0;
     uint32_t slot=0;while(slot<bodies.size()&&bodies[slot].actor)++slot;if(slot>=desc.maxBodies)return 0;
     {PxScopedCudaLock lock(*runtime.cuda);Cuda(cudaStreamSynchronize(stream),"retire actor creation consumers");}
     if(slot==bodies.size())bodies.emplace_back();Body b;b.geometry=d;b.geometry.convexVertices=nullptr;b.initial=P(d.pose).getNormalized();b.committed=b.initial;b.lastTarget=b.initial;b.kinematic=d.kind==LAB_PHYSICS_KINEMATIC;b.collisionMask=d.collisionMask;
@@ -338,6 +338,14 @@ uint32_t PhysicsRuntime::Impl::Scene::SetBodyCollisionEnabled(LabPhysicsBodyV1 h
     shape->setSimulationFilterData(filter);
     Gpu(scene->resetFiltering(*b->actor),"PhysX GPU body collision filter update failed");runtime.Check();
     b->collisionEnabled=enabled;descriptorsDirty=true;return 1;
+}
+uint32_t PhysicsRuntime::Impl::Scene::SetBodySpeculativeCCD(LabPhysicsBodyV1 h,bool enabled){
+    auto* b=FindBody(h);if(!b||b->kinematic)return 0;
+    auto* dynamic=b->actor->is<PxRigidDynamic>();if(!dynamic)return 0;
+    PxScopedCudaLock lock(*runtime.cuda);
+    Cuda(cudaStreamSynchronize(stream),"retire CCD flag consumers");
+    dynamic->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD,enabled);
+    runtime.Check();return 1;
 }
 uint32_t PhysicsRuntime::Impl::Scene::CreateD6(const LabPhysicsD6DescV1& d,LabPhysicsJointV1* out){
     if(!out)return 0;*out=0;if(d.structSize<sizeof(d)||!Valid(d.frameA)||!Valid(d.frameB)||d.bodyA==d.bodyB)return 0;
@@ -394,7 +402,10 @@ void PhysicsRuntime::Impl::Scene::RefreshDescriptors(){
     for(auto h:probes){auto* b=FindBody(h);if(b)probeHost.push_back({h,reinterpret_cast<uint64_t>(b->actor),b->index,0,b->initial});}
     for(auto& b:bodies)if(b.actor)actorHost.push_back({reinterpret_cast<uint64_t>(b.actor),b.handle});
     for(auto& b:bodies)if(b.actor){const auto& g=b.geometry;PopulationBodyGpu d{};d.initial=b.initial;d.local=P(g.shapePose);d.dimensions=V(g.dimensions);d.index=b.index;d.shape=g.shape;d.enabled=b.collisionEnabled&&(g.collisionMask&population.layer)&&(g.layer&population.collisionMask);d.hand=b.handle==populationInput.hands[0]||b.handle==populationInput.hands[1];d.kinematic=b.kinematic;d.restitution=g.restitution;d.handle=b.handle;
-        d.radius=g.shape==LAB_PHYSICS_BOX?V(g.dimensions).magnitude():g.dimensions.x+(g.shape==LAB_PHYSICS_CAPSULE?g.dimensions.y:0);populationBodyHost.push_back(d);}
+        // Flies use a conservative sphere around a convex PhysX collider.
+        // The rigid bodies keep their cooked convex geometry and exact contacts.
+        if(g.shape==LAB_PHYSICS_CONVEX){d.shape=LAB_PHYSICS_SPHERE;d.dimensions=PxVec3(V(g.dimensions).magnitude());}
+        d.radius=d.shape==LAB_PHYSICS_BOX?d.dimensions.magnitude():d.dimensions.x+(d.shape==LAB_PHYSICS_CAPSULE?d.dimensions.y:0);populationBodyHost.push_back(d);}
     Upload(stream,populationBodies,populationBodyHost);
     Upload(stream,visualDevice,visualHost);Upload(stream,lightDevice,lightHost);Upload(stream,aeroDevice,aeroHost);Upload(stream,probeDevice,probeHost);Upload(stream,actorDevice,actorHost);descriptorsDirty=false;
 }
@@ -875,7 +886,6 @@ uint32_t PhysicsRuntime::Impl::Scene::ConfigurePopulation(const LabPopulationDes
     if(desc.maxBodies>LAB_PHYSICS_POPULATION_COLLIDERS_V1||insectCapacity||d.structSize<sizeof(d)||d.layer==0||d.collisionMask==0||d.capacity<1||d.capacity>LAB_PHYSICS_POPULATION_MAX_V1||d.initialCount>d.capacity||!Valid(d.spawnCenter)||!Valid(d.spawnHalfExtent)||d.spawnHalfExtent.x<0||d.spawnHalfExtent.y<0||d.spawnHalfExtent.z<0||!ValidFlight(d.flight))return 0;
     for(auto mesh:{d.proxyMesh,d.bodyMesh,d.headMesh,d.abdomenMesh,d.leftWingMesh,d.rightWingMesh})if(mesh>=ConsoleSpec::MaxMeshes)return 0;
     for(auto mat:{d.bodyMaterial,d.headMaterial,d.wingMaterial})if(mat>=ConsoleSpec::MaxMaterials)return 0;
-    for(auto& b:bodies)if(b.actor&&b.geometry.shape==LAB_PHYSICS_CONVEX)return 0;
     PxScopedCudaLock lock(*runtime.cuda);population=d;populationEffects.fleeSeconds=d.flight.impactSeconds;descriptorsDirty=true;populationClockOrigin=lastTime;populationClockStarted=lastTime>0;Allocate(populationBodyPoses,desc.maxBodies);Cuda(cudaMemsetAsync(populationBodyPoses,0,desc.maxBodies*sizeof(PopulationBodyPoseGpu),stream),"initialize population collider history");Allocate(populationGrid,PopulationGridWords);insectCapacity=d.capacity;Allocate(insects,insectCapacity);insectCount=d.initialCount;
     if(descriptorsDirty)RefreshDescriptors();PopulationInitialize(stream,insects,0,insectCount,population,++birthGeneration,populationBodies,uint32_t(populationBodyHost.size()),started?current:nullptr);Cuda(cudaGetLastError(),"initialize GPU population");
     auto v=visuals;auto l=lights;SetVisuals(v.data(),uint32_t(v.size()),l.data(),uint32_t(l.size()));return 1;
@@ -927,6 +937,7 @@ uint64_t PhysicsRuntime::CreateOwner(const LabGpuInteropServiceV1& interop){
     t.SetProbes=[](void* c,LabPhysicsSceneV1 h,const LabPhysicsBodyV1* b,LabU32 n)->LabU32{if(!c||(n&&!b)||n>LABOVR_PHYSICS_MAX_PROBES_V1)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);if(!s)return 0;for(uint32_t i=0;i<n;i++)if(!s->FindBody(b[i]))return 0;s->lastProbeFrame=s->frame;s->probes.clear();if(n)s->probes.assign(b,b+n);s->descriptorsDirty=true;return 1;};
     t.PollSnapshot=[](void* c,LabPhysicsSceneV1 h,LabPhysicsSnapshotV1* out)->LabU32{if(!c)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->Poll(out):0;};
     t.SetBodyCollisionEnabled=[](void* c,LabPhysicsSceneV1 h,LabPhysicsBodyV1 b,LabU32 enabled)->LabU32{if(!c||enabled>1)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->SetBodyCollisionEnabled(b,enabled!=0):0;};
+    t.SetBodySpeculativeCCD=[](void* c,LabPhysicsSceneV1 h,LabPhysicsBodyV1 b,LabU32 enabled)->LabU32{if(!c||enabled>1)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->SetBodySpeculativeCCD(b,enabled!=0):0;};
     t.CreatePopulation=[](void* c,LabPhysicsSceneV1 h,const LabPopulationDescV1* d)->LabU32{if(!c||!d)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->ConfigurePopulation(*d):0;};
     t.SetPopulationCount=[](void* c,LabPhysicsSceneV1 h,LabU32 n)->LabU32{if(!c)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->ResizePopulation(n):0;};
     t.SetFlightSettings=[](void* c,LabPhysicsSceneV1 h,const LabFlightSettingsV1* f)->LabU32{if(!c||!f||!ValidFlight(*f))return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);if(!s||!s->insectCapacity||f->seed!=s->population.flight.seed)return 0;s->population.flight=*f;s->populationEffects.fleeSeconds=f->impactSeconds;return 1;};

@@ -167,9 +167,8 @@ typedef struct LabPhysicsServiceV1 {
        settings and tracked input edits. GPU allocation grows geometrically;
        count changes preserve existing state. Poll is nonblocking and returns
        bounded diagnostics/audio representatives, never the population array.
-       supportedShapes is deliberately box/sphere/capsule; population setup
-       rejects convex geometry or a scene capacity above 128 colliders rather
-       than silently dropping obstacles. */
+       Convex PhysX colliders use a conservative bounding sphere for insect
+       avoidance; scene capacity above 128 is rejected. */
     LabU32 (LABOVR_PLUGIN_CALL *CreatePopulation)(void*,LabPhysicsSceneV1,const LabPopulationDescV1*);
     LabU32 (LABOVR_PLUGIN_CALL *SetPopulationCount)(void*,LabPhysicsSceneV1,LabU32);
     LabU32 (LABOVR_PLUGIN_CALL *SetFlightSettings)(void*,LabPhysicsSceneV1,const LabFlightSettingsV1*);
@@ -187,4 +186,6 @@ typedef struct LabPhysicsServiceV1 {
     LabU32 (LABOVR_PLUGIN_CALL *ValidateEdit)(void*,LabPhysicsSceneV1,LabPhysicsEditValidationV1*);
     LabU32 (LABOVR_PLUGIN_CALL *SetAirflows)(void*,LabPhysicsSceneV1,const LabPhysicsAirflowV1*,LabU32);
     LabU32 (LABOVR_PLUGIN_CALL *SetPopulationSpace)(void*,LabPhysicsSceneV1,const LabPopulationSpaceV1*);
+    /* Optional tail: toggle speculative CCD on one dynamic body at runtime. */
+    LabU32 (LABOVR_PLUGIN_CALL *SetBodySpeculativeCCD)(void*,LabPhysicsSceneV1,LabPhysicsBodyV1,LabU32);
 } LabPhysicsServiceV1;

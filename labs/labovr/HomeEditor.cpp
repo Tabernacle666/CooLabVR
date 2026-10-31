@@ -23,6 +23,7 @@ LabU64 NodeId(const std::string& id){LabU64 h=14695981039346656037ull;for(unsign
 void HomePhysics::BuildSelections(){
     selections_.clear();auto group=[&](LabU64 id,const char* name,std::initializer_list<uint32_t> groups){Selection s;s.id=id;s.name=name;for(const auto& e:entities_)if(std::find(groups.begin(),groups.end(),e.group)!=groups.end())s.bodies.push_back(e.body);selections_.push_back(std::move(s));};
     group(1,"TABLE + FAN",{1,4});group(2,"TABLE",{1});group(3,"FAN COMPLETE",{4});group(8,"SUSPENSION COMPLETE",{3});group(27,"ROOM REMAINING",{0});
+    group(39,"VASE COMPLETE",{5});group(40,"ROCKS",{6});group(41,"BONSAI",{7});
     auto subset=[&](LabU64 id,const char* name,const char* prefix){Selection s;s.id=id;s.name=name;for(const auto& e:entities_)if(e.id.rfind(prefix,0)==0)s.bodies.push_back(e.body);selections_.push_back(std::move(s));};
     subset(9,"CABLE","lamp-cable-");subset(10,"HUB","lamp-socket");subset(11,"BULB","lamp-bulb");subset(12,"CHAIN + SWITCH","lamp-chain-");
     for(const auto& e:entities_)if(e.id=="lamp-switch-slider"||e.id=="lamp-pull-handle")selections_.back().bodies.push_back(e.body);
@@ -36,12 +37,14 @@ std::vector<LabTerminalNodeV2> HomePhysics::EditorNodes()const{
     node(1,0,"TABLE + FAN",1);node(2,1,"TABLE",1);node(3,1,"FAN",7);
     node(4,3,"MOTOR",6,3,4);node(5,3,"ROTOR",1,3,5);node(6,3,"AIRFLOW",4,3,6);node(7,3,"AUDIO",0,3,7);
     node(8,0,"SUSPENSION",3);node(9,8,"CABLE",1,8,9);node(10,8,"HUB",1,8,10);node(11,8,"BULB / LIGHT",3,8,11);node(12,8,"CHAIN / SWITCH",1,8,12);
+    node(39,0,"VASE",1);node(40,39,"ROCKS",1);node(41,39,"BONSAI",1);
     node(13,0,"FLIES",6);node(14,13,"POPULATION",6,13,14);node(15,13,"FLIGHT / FOURIER",6,13,15);node(16,13,"IMPACT",4,13,16);
     node(17,13,"HAND SWEEP",4,13,17);node(18,13,"SHADOWS",4,13,18);node(19,13,"OPTICAL SWARM",6,13,19);node(20,13,"APPEARANCE",4,13,20);
     node(21,0,"ATMOSPHERE",6);node(22,21,"FOG",6,21,22);node(24,21,"WIND / ADVECTION",4,21,24);node(25,0,"CONTROL PANEL",7);node(27,0,"ROOM REMAINING",1);node(31,27,"MATERIALS",0);const char* surfaces[]{"FLOOR","CEILING","WALL -Z","WALL -X","WALL +X"};for(uint32_t i=0;i<5;i++)node(32+i,31,surfaces[i],4,27,32+i);node(28,0,"CONSOLE",2);node(29,0,"CONTROLLERS",0);node(30,29,"PHYSICAL TOUCH",4,29,30);
     if(population_.targetId!=Invalid)node(26,13,"TARGETED FLY",0,TargetIdentity(),26);
     for(const auto& e:entities_){LabU64 parent=0;
         if(e.group==0)parent=27;else if(e.group==1)parent=2;else if(e.group==4)parent=e.body==fanRotor_?5:3;
+        else if(e.group==5)parent=39;else if(e.group==6)parent=40;else if(e.group==7)parent=41;
         else if(e.id.rfind("lamp-cable-",0)==0)parent=9;else if(e.id=="lamp-socket")parent=10;else if(e.id=="lamp-bulb")parent=11;
         else if(e.id.rfind("lamp-chain-",0)==0||e.id=="lamp-switch-slider"||e.id=="lamp-pull-handle")parent=12;else parent=8;
         node(NodeId(e.id),parent,e.name.c_str(),1,NodeId(e.id),NodeId(e.id));

@@ -56,6 +56,7 @@ void HomeWorld::BuildPanel(){
         switch(action){
         case PanelAction::Freeze:on=physics_.Frozen();break;
         case PanelAction::Fan:on=index==0&&physics_.FanEnabled();break;
+        case PanelAction::FanCCD:on=physics_.FanCCD();break;
         case PanelAction::Lamp:on=physics_.LampEnabled();break;
         case PanelAction::Fog:on=index==0&&physics_.Fog().enabled;break;
         case PanelAction::Optical:on=index==0&&physics_.Optical().enabled;break;
@@ -85,6 +86,7 @@ void HomeWorld::BuildPanel(){
     }else if(inspectorTab_==1){
         if(selectedNode_==28){button(PanelAction::Capture,0,"CAPTURE PNG");button(PanelAction::CaptureEye,0,physics_.CaptureEye()?"EYE RIGHT / LEFT":"EYE LEFT / RIGHT");button(PanelAction::CaptureInterface,0,physics_.CaptureInterface()?"INTERFACE INCLUDED / HIDE":"INTERFACE HIDDEN / INCLUDE");text("LEFT X OR Y / PRESS ONCE");const auto& capture=physics_.CaptureStatus();text(capture.message);text("DESTINATION");std::string dir=capture.directoryUtf8;for(size_t i=0;i<dir.size();i+=42)text(dir.substr(i,42).c_str());}
         if(selectedNode_==3||selectedNode_==4)button(PanelAction::Fan,0,physics_.FanEnabled()?"FAN ON / OFF":"FAN OFF / ON");
+        if(selectedNode_==3)button(PanelAction::FanCCD,0,physics_.FanCCD()?"SPECULATIVE CCD ON / OFF":"SPECULATIVE CCD OFF / ON");
         if(selectedNode_==8||selectedNode_==11)button(PanelAction::Lamp,0,physics_.LampEnabled()?"LAMP ON / OFF":"LAMP OFF / ON");
         if(selectedNode_==13||selectedNode_==14){button(PanelAction::Population,0,"+500");button(PanelAction::Population,1,"+5000");button(PanelAction::Population,2,"-500");button(PanelAction::Population,3,"-5000");}
         if(selectedNode_==13||selectedNode_==15)button(PanelAction::Flight,99,"RESET FLIGHT");
@@ -157,6 +159,7 @@ void HomeWorld::InvokePanel(const PanelControl& c,double dt){
     case PanelAction::Effects:physics_.AdjustEffects(c.index,c.sign);break;
     case PanelAction::Fog:physics_.AdjustFog(c.index,c.sign);break;
     case PanelAction::Fan:physics_.AdjustFan(c.index,c.sign);break;
+    case PanelAction::FanCCD:physics_.ToggleFanCCD();heldControl_={};break;
     case PanelAction::Optical:physics_.AdjustOptical(c.index,c.sign);break;
     case PanelAction::Population:{const int deltas[]{500,5000,-500,-5000};physics_.AddPopulation(deltas[c.index]);break;}
     case PanelAction::Lamp:physics_.SetLampEnabled(!physics_.LampEnabled());break;

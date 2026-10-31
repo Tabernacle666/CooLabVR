@@ -26,6 +26,7 @@ class HomePhysics {
     uint32_t selection_{},editSpeed_{1},buildingGroup_{};bool frozen_{};
     std::string status_{"READY"};double simulationSeconds_{};
     LabPhysicsBodyV1 fanBase_{},fanRotor_{};LabPhysicsJointV1 fanJoint_{};
+    std::array<LabPhysicsBodyV1,4> fanBodies_{};bool fanCcd_{};
     float fanRpm_{900},fanActualRpm_{},fanWind_{1};bool fanEnabled_{true};
     LabMultisamplingV1 multisampling_{sizeof(LabMultisamplingV1),1};
     LabPopulationSpaceV1 populationSpace_{sizeof(LabPopulationSpaceV1),1,{0,1.875f,0},{3.7f,1.60f,3.7f},4};
@@ -114,7 +115,8 @@ public:
 
     const char* Status()const{return status_.c_str();}
     void ProfileCommand(uint32_t);void AdjustFan(uint32_t,float);
-    bool FanEnabled()const{return fanEnabled_;}float FanRpm()const{return fanRpm_;}float FanActualRpm()const{return fanActualRpm_;}float FanWind()const{return fanWind_;}
+    bool FanEnabled()const{return fanEnabled_;}bool FanCCD()const{return fanCcd_;}void ToggleFanCCD();
+    float FanRpm()const{return fanRpm_;}float FanActualRpm()const{return fanActualRpm_;}float FanWind()const{return fanWind_;}
     double SimulationSeconds()const{return simulationSeconds_;}
     void LoadConfiguration(const std::wstring&);
     // Transient diagnostics only: never writes the creator's saved profile.
