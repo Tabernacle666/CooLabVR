@@ -32,7 +32,7 @@ class HomeWorld final:public WorldLayer {
     bool diagnosticHands_{};
     Pose diagnosticCamera_{};
     uint32_t worldPageIndex_{};
-    enum class PanelAction:uint32_t {None,Select,Expand,TreeScroll,Tab,Freeze,Theme,Face,Profile,Translate,Speed,Flight,Effects,Fog,Fan,Optical,Population,Lamp,Rotate,LocalReset,Size,Capture,CaptureEye,CaptureInterface,Touch,HandResponse,Antialiasing,Transport,Surface,FanYaw,Multisampling,PopulationSpace};
+    enum class PanelAction:uint32_t {None,Select,Expand,TreeScroll,Tab,Freeze,Theme,Face,Profile,Translate,Speed,Flight,Effects,Fog,Fan,Optical,Population,Lamp,Rotate,LocalReset,Size,Capture,CaptureEye,CaptureInterface,Touch,HandResponse,Antialiasing,Transport,Surface,FanYaw,Multisampling,PopulationSpace,FanCCD};
     struct PanelControl {LabU64 id{},node{};PanelAction action{};uint32_t index{};float sign{};};
     LabU64 selectedNode_{3},panelHover_{};
     uint32_t inspectorTab_{},treeScroll_{};

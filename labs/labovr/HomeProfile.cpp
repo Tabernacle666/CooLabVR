@@ -63,10 +63,13 @@ bool HomePhysics::ReadProfile(uint32_t scope,bool automatic){
         if(std::any_of(poses.begin(),poses.end(),[&](const auto& p){return p.body==e->body;})){r.ok=false;break;}poses.push_back({e->body,pose});if(poses.size()>entities_.size())r.ok=false;
     }
     if(poses.size()!=entities_.size()){for(const auto& e:entities_)if(std::none_of(poses.begin(),poses.end(),[&](const auto& p){return p.body==e.body;})){
-        if(e.id=="fan-post-collider"||e.id=="fan-head-collider"){
-            auto base=std::find_if(entities_.begin(),entities_.end(),[&](const auto& x){return x.body==fanBase_;});
-            auto saved=std::find_if(poses.begin(),poses.end(),[&](const auto& x){return x.body==fanBase_;});
-            if(base==entities_.end()||saved==poses.end()){status_="PROFILE MISSING FAN BASE";return false;}
+        bool fanPart=e.id=="fan-post-collider"||e.id=="fan-head-collider";
+        bool newObject=e.id.rfind("vase-",0)==0;
+        if(fanPart||newObject){
+            auto anchorId=fanPart?"fan-base":"table-top";
+            auto base=std::find_if(entities_.begin(),entities_.end(),[&](const auto& x){return x.id==anchorId;});
+            auto saved=base==entities_.end()?poses.end():std::find_if(poses.begin(),poses.end(),[&](const auto& x){return x.body==base->body;});
+            if(base==entities_.end()||saved==poses.end()){status_="PROFILE MISSING OBJECT ANCHOR";return false;}
             auto cv=[](LabPoseV1 p){return Pose{{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}};};
             auto transformed=FromMatrix(Matrix(cv(e.pose))*XMMatrixInverse(nullptr,Matrix(cv(base->pose)))*Matrix(cv(saved->pose)));
             poses.push_back({e.body,{{transformed.p.x,transformed.p.y,transformed.p.z},{transformed.q.x,transformed.q.y,transformed.q.z,transformed.q.w}}});
@@ -80,7 +83,7 @@ bool HomePhysics::ReadProfile(uint32_t scope,bool automatic){
     if(anchors.size()!=connections_.size()){for(const auto& c:connections_)if(std::none_of(anchors.begin(),anchors.end(),[&](const auto& a){return a.joint==c.joint;})){
         // Profiles saved before the table became physical have no leg joints.
         // Preserve their saved table layout and derive each fixed joint from it.
-        if(c.id.rfind("table-top--table-leg-",0)==0||c.id=="fan-base--fan-post-collider"||c.id=="fan-base--fan-head-collider"){
+        if(c.id.rfind("table-top--table-leg-",0)==0||c.id=="fan-base--fan-post-collider"||c.id=="fan-base--fan-head-collider"||c.id.rfind("vase-base--vase-wall-",0)==0){
             auto a=std::find_if(poses.begin(),poses.end(),[&](const auto& p){return p.body==c.bodyA;});
             auto b=std::find_if(poses.begin(),poses.end(),[&](const auto& p){return p.body==c.bodyB;});
             if(a==poses.end()||b==poses.end()){status_="PROFILE MISSING TABLE BODY";return false;}
