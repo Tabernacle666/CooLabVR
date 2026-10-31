@@ -151,11 +151,19 @@ void HomePhysics::Build(SceneData& assets){
     Joint(Connection(previous,pullHandle_,PoseAt({0,-chainPitch*.5f,0}),PoseAt({0,.025f,0}),true));
 
     buildingGroup_=4;
-    auto baseDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.55f,1.35f},{.215f,.025f,.17f},2.f,RoomLayer);baseDesc.shapePose.position={0,-.4f,0};fanBase_=Body(baseDesc);entities_.back().id="fan-base";entities_.back().name="Fan stand / housing";
+    auto baseDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.55f,1.35f},{.215f,.025f,.17f},2.f,RoomLayer);baseDesc.shapePose.position={0,-.4f,0};baseDesc.reserved[0]=LAB_PHYSICS_BODY_SPECULATIVE_CCD;baseDesc.collisionGroup=0x500u;fanBase_=Body(baseDesc);entities_.back().id="fan-base";entities_.back().name="Fan stand / housing";
     Visual(fanBase_,uint32_t(Mesh::Cylinder),Material::Steel,{.43f,.05f,.34f},PoseAt({0,-.4f,0}));
     Visual(fanBase_,uint32_t(Mesh::Box),Material::Steel,{.055f,.65f,.055f},PoseAt({0,-.06f,.08f}));
     Visual(fanBase_,uint32_t(Mesh::Cylinder),Material::Charcoal,{.44f,.06f,.44f},PoseAt({0,.32f,.055f},Rotation(XM_PIDIV2,0,0)));
-    auto rotorDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.87f,1.27f},{.17f,.025f,.009f},.06f,ChainLayer);rotorDesc.collisionMask=RoomLayer|HandLayer;rotorDesc.angularDamping=.003f;rotorDesc.inertia={.0003f,.0003f,.0006f};fanRotor_=Body(rotorDesc);entities_.back().id="fan-rotor";entities_.back().name="Fan rotor / blades";
+    auto fanPart=[&](const char* id,const char* name,XMFLOAT3 offset,XMFLOAT3 halfExtent,float mass){
+        auto d=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,Add({-.85f,1.55f,1.35f},offset),halfExtent,mass,RoomLayer);
+        d.collisionGroup=0x500u;d.reserved[0]=LAB_PHYSICS_BODY_SPECULATIVE_CCD;
+        auto part=Body(d);entities_.back().id=id;entities_.back().name=name;
+        Joint(Connection(fanBase_,part,PoseAt(offset),PoseAt({0,0,0}),false));
+    };
+    fanPart("fan-post-collider","Fan post",{0,-.06f,.08f},{.0275f,.325f,.0275f},.3f);
+    fanPart("fan-head-collider","Fan housing",{0,.32f,.055f},{.22f,.22f,.03f},.5f);
+    auto rotorDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.87f,1.27f},{.17f,.025f,.009f},.06f,ChainLayer);rotorDesc.collisionMask=RoomLayer|HandLayer;rotorDesc.collisionGroup=0x500u;rotorDesc.reserved[0]=LAB_PHYSICS_BODY_SPECULATIVE_CCD;rotorDesc.angularDamping=.003f;rotorDesc.inertia={.0003f,.0003f,.0006f};fanRotor_=Body(rotorDesc);entities_.back().id="fan-rotor";entities_.back().name="Fan rotor / blades";
     for(uint32_t blade=0;blade<3;blade++){float angle=blade*XM_2PI/3;auto q=Rotation(0,0,angle);Visual(fanRotor_,uint32_t(Mesh::Box),Material::Steel,{.07f,.18f,.014f},PoseAt(Rotated({0,.10f,0},q),q));}
     Visual(fanRotor_,uint32_t(Mesh::Sphere),Material::Charcoal,{.06f,.06f,.04f});
     auto axle=Connection(fanBase_,fanRotor_,PoseAt({0,.32f,-.08f},Rotation(0,XM_PIDIV2,0)),PoseAt({0,0,0},Rotation(0,XM_PIDIV2,0)),false);
@@ -371,9 +379,10 @@ void HomePhysics::Update(uint64_t frame,double now,std::span<const SceneLight> a
     if(fresh){stateCount_=snapshot.stateCount;sourceFrame_=snapshot.sourceFrame;stateSeconds_=snapshot.simulationSeconds;simulationSeconds_=snapshot.simulationSeconds;if(states_[4].body==fanRotor_)fanActualRpm_=std::clamp(Length(V(states_[4].angularVelocity))*60.f/XM_2PI,0.f,2100.f);}
     if(SessionLogCompact()&&fresh&&now>=diagnosticMechanismAt_){
         diagnosticMechanismAt_=now+1.;
-        const auto& q=states_[4].pose.orientation;
-        LogEvent(frame,"home.mechanisms","frozen=%u fan_enabled=%u set_rpm=%.1f actual_rpm=%.1f rotor_q=%.4f,%.4f,%.4f,%.4f grip_l=%u grip_r=%u lamp=%u",
-            unsigned(frozen_),unsigned(fanEnabled_),fanRpm_,fanActualRpm_,q.x,q.y,q.z,q.w,unsigned(grips_[0]!=0),unsigned(grips_[1]!=0),unsigned(LampEnabled()));
+        const auto& rotor=states_[4];const auto& q=rotor.pose.orientation;
+        auto base=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==fanBase_;});
+        if(base!=states_.begin()+stateCount_)LogEvent(frame,"home.mechanisms","frozen=%u fan_enabled=%u set_rpm=%.1f actual_rpm=%.1f base_xyz=%.4f,%.4f,%.4f base_v=%.4f,%.4f,%.4f rotor_xyz=%.4f,%.4f,%.4f rotor_q=%.4f,%.4f,%.4f,%.4f grip_l=%u grip_r=%u lamp=%u",
+            unsigned(frozen_),unsigned(fanEnabled_),fanRpm_,fanActualRpm_,base->pose.position.x,base->pose.position.y,base->pose.position.z,base->linearVelocity.x,base->linearVelocity.y,base->linearVelocity.z,rotor.pose.position.x,rotor.pose.position.y,rotor.pose.position.z,q.x,q.y,q.z,q.w,unsigned(grips_[0]!=0),unsigned(grips_[1]!=0),unsigned(LampEnabled()));
     }
     bool sampled=sourceFrame_&&sourceFrame_<=frame&&frame-sourceFrame_<6;
     UpdateHands(input,dt,trackingReset,sampled,commands);

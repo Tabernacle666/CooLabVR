@@ -62,7 +62,16 @@ bool HomePhysics::ReadProfile(uint32_t scope,bool automatic){
         auto e=std::find_if(entities_.begin(),entities_.end(),[&](const auto& e){return e.id==id;});if(e==entities_.end()){status_="PROFILE UNKNOWN OBJECT: "+id;return false;}
         if(std::any_of(poses.begin(),poses.end(),[&](const auto& p){return p.body==e->body;})){r.ok=false;break;}poses.push_back({e->body,pose});if(poses.size()>entities_.size())r.ok=false;
     }
-    if(poses.size()!=entities_.size()){for(const auto& e:entities_)if(std::none_of(poses.begin(),poses.end(),[&](const auto& p){return p.body==e.body;})){status_="PROFILE MISSING OBJECT: "+e.id;return false;}}r.Need(',');r.Key("joints");r.Need('[');
+    if(poses.size()!=entities_.size()){for(const auto& e:entities_)if(std::none_of(poses.begin(),poses.end(),[&](const auto& p){return p.body==e.body;})){
+        if(e.id=="fan-post-collider"||e.id=="fan-head-collider"){
+            auto base=std::find_if(entities_.begin(),entities_.end(),[&](const auto& x){return x.body==fanBase_;});
+            auto saved=std::find_if(poses.begin(),poses.end(),[&](const auto& x){return x.body==fanBase_;});
+            if(base==entities_.end()||saved==poses.end()){status_="PROFILE MISSING FAN BASE";return false;}
+            auto cv=[](LabPoseV1 p){return Pose{{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}};};
+            auto transformed=FromMatrix(Matrix(cv(e.pose))*XMMatrixInverse(nullptr,Matrix(cv(base->pose)))*Matrix(cv(saved->pose)));
+            poses.push_back({e.body,{{transformed.p.x,transformed.p.y,transformed.p.z},{transformed.q.x,transformed.q.y,transformed.q.z,transformed.q.w}}});
+        }else{status_="PROFILE MISSING OBJECT: "+e.id;return false;}
+    }}r.Need(',');r.Key("joints");r.Need('[');
     while(r.ok&&!r.Take(']')){
         if(!anchors.empty())r.Need(',');r.Need('{');r.Key("id");auto id=r.String();r.Need(',');r.Key("a");auto a=r.Pose(256);r.Need(',');r.Key("b");auto b=r.Pose(256);r.Need('}');
         auto j=std::find_if(connections_.begin(),connections_.end(),[&](const auto& j){return j.id==id;});if(j==connections_.end()){status_="PROFILE UNKNOWN JOINT: "+id;return false;}
@@ -71,7 +80,7 @@ bool HomePhysics::ReadProfile(uint32_t scope,bool automatic){
     if(anchors.size()!=connections_.size()){for(const auto& c:connections_)if(std::none_of(anchors.begin(),anchors.end(),[&](const auto& a){return a.joint==c.joint;})){
         // Profiles saved before the table became physical have no leg joints.
         // Preserve their saved table layout and derive each fixed joint from it.
-        if(c.id.rfind("table-top--table-leg-",0)==0){
+        if(c.id.rfind("table-top--table-leg-",0)==0||c.id=="fan-base--fan-post-collider"||c.id=="fan-base--fan-head-collider"){
             auto a=std::find_if(poses.begin(),poses.end(),[&](const auto& p){return p.body==c.bodyA;});
             auto b=std::find_if(poses.begin(),poses.end(),[&](const auto& p){return p.body==c.bodyB;});
             if(a==poses.end()||b==poses.end()){status_="PROFILE MISSING TABLE BODY";return false;}

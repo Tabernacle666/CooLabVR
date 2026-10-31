@@ -13,6 +13,7 @@ typedef LabU64 LabPhysicsBodyV1;
 typedef LabU64 LabPhysicsJointV1;
 enum LabPhysicsBodyKindV1 { LAB_PHYSICS_STATIC=0, LAB_PHYSICS_DYNAMIC=1, LAB_PHYSICS_KINEMATIC=2 };
 enum LabPhysicsShapeKindV1 { LAB_PHYSICS_BOX=0, LAB_PHYSICS_SPHERE=1, LAB_PHYSICS_CAPSULE=2, LAB_PHYSICS_CONVEX=3 };
+enum LabPhysicsBodyFlagsV1 { LAB_PHYSICS_BODY_SPECULATIVE_CCD=1u };
 enum LabPhysicsMotionV1 { LAB_PHYSICS_LOCKED=0, LAB_PHYSICS_LIMITED=1, LAB_PHYSICS_FREE=2 };
 enum LabPhysicsD6DriveKindV1 { LAB_PHYSICS_DRIVE_X=0, LAB_PHYSICS_DRIVE_Y=1, LAB_PHYSICS_DRIVE_Z=2, LAB_PHYSICS_DRIVE_SWING=3, LAB_PHYSICS_DRIVE_TWIST=4, LAB_PHYSICS_DRIVE_SLERP=5 };
 enum LabPhysicsCommandKindV1 { LAB_PHYSICS_FORCE=0, LAB_PHYSICS_TORQUE=1, LAB_PHYSICS_IMPULSE=2, LAB_PHYSICS_ANGULAR_IMPULSE=3, LAB_PHYSICS_KINEMATIC_TARGET=4 };
@@ -25,7 +26,7 @@ typedef struct LabPhysicsSceneDescV1 {
 } LabPhysicsSceneDescV1;
 typedef struct LabPhysicsBodyDescV1 {
     LabU32 structSize,kind,shape,layer;
-    LabU32 collisionMask,collisionGroup,reserved[2];
+    LabU32 collisionMask,collisionGroup,reserved[2]; /* reserved[0]: LabPhysicsBodyFlagsV1 */
     LabPoseV1 pose,shapePose;
     /* Box half extents; sphere radius in x; capsule radius/halfHeight in x/y (axis X). */
     LabVec3V1 dimensions;
