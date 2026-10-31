@@ -157,6 +157,8 @@ struct PhysicsRuntime::Impl {
             uint64_t deviceZeroSteps{},hostUploadSteps{};
             uint64_t gpuStepSamples{},gpuFrameSamples{},untimedGpuSteps{};
             uint64_t motorWrites{},motorUnchangedSkips{};
+            uint64_t fetchByOrdinal[2]{}, fetchBuckets[5]{};
+            double fetchSumByOrdinalMs[2]{}, fetchPeakByOrdinalMs[2]{}, checkResultsMs{};
             double gpuStepSumMs{},gpuStepPeakMs{},gpuFrameSumMs{},gpuFramePeakMs{};
             double frameCpuMs{},stepCpuMs{},maxStepCpuMs{},contextLockMs{};
             double commandWaitMs{},fetchBlockedMs{},fetchReadyMs{},topologyWaitMs{};
@@ -171,7 +173,7 @@ struct PhysicsRuntime::Impl {
         uint32_t SetBodyCollisionEnabled(LabPhysicsBodyV1,bool);
         uint32_t CreateD6(const LabPhysicsD6DescV1&,LabPhysicsJointV1*);uint32_t ConfigureD6(LabPhysicsJointV1,const LabPhysicsD6DescV1&);uint32_t DestroyJoint(LabPhysicsJointV1);
         uint32_t Pause(bool);uint32_t EditSnapshot(LabPhysicsEditSnapshotV1*);uint32_t Edit(const LabPhysicsEditBatchV1&);uint32_t Translate(const LabPhysicsBodyV1*,uint32_t,LabVec3V1);uint32_t ValidateEdit(LabPhysicsEditValidationV1*);void CaptureEditPoses();void WriteEditPoses();void CommitEditPoses();
-        void RefreshIndices();void RefreshDescriptors();void ReadState(bool first);void Step(float);void Advance(double,uint64_t);
+        void RefreshIndices();void RefreshDescriptors();void ReadState(bool first);void Step(float,uint32_t);void Advance(double,uint64_t);
         Timing* BeginTiming(std::span<Timing>,uint32_t&,uint64_t=0,uint64_t=0);
         void CollectTimings();
         uint32_t SetVisuals(const LabPhysicsVisualV1*,uint32_t,const LabPhysicsLightV1*,uint32_t);
@@ -241,8 +243,11 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
             double(p.steps)*invFrames,double(desc.fixedStepSeconds)*1000.,desc.maxSubsteps,static_cast<unsigned long long>(p.droppedFrames),
             droppedSeconds,p.frameCpuMs*invFrames,p.stepCpuMs*invSteps,p.maxStepCpuMs,p.contextLockMs*invFrames);
         LogEvent(0,"physics.profile.wait",
-            "fetch_blocked_steps=%llu fetch_blocked_total_ms=%.3f fetch_ready_total_ms=%.3f command_wait_total_ms=%.3f topology_wait_total_ms=%.3f",
-            static_cast<unsigned long long>(p.fetchBlocked),p.fetchBlockedMs,p.fetchReadyMs,p.commandWaitMs,p.topologyWaitMs);
+            "fetch_blocked_steps=%llu fetch_blocked_total_ms=%.3f fetch_ready_total_ms=%.3f command_wait_total_ms=%.3f topology_wait_total_ms=%.3f check_avg_ms=%.4f first_count=%llu first_avg_ms=%.3f first_peak_ms=%.3f later_count=%llu later_avg_ms=%.3f later_peak_ms=%.3f fetch_lt_0_5ms=%llu fetch_0_5_to_1ms=%llu fetch_1_to_2ms=%llu fetch_2_to_4ms=%llu fetch_ge_4ms=%llu",
+            static_cast<unsigned long long>(p.fetchBlocked),p.fetchBlockedMs,p.fetchReadyMs,p.commandWaitMs,p.topologyWaitMs,p.checkResultsMs*invSteps,
+            static_cast<unsigned long long>(p.fetchByOrdinal[0]),p.fetchByOrdinal[0]?p.fetchSumByOrdinalMs[0]/double(p.fetchByOrdinal[0]):0.,p.fetchPeakByOrdinalMs[0],
+            static_cast<unsigned long long>(p.fetchByOrdinal[1]),p.fetchByOrdinal[1]?p.fetchSumByOrdinalMs[1]/double(p.fetchByOrdinal[1]):0.,p.fetchPeakByOrdinalMs[1],
+            static_cast<unsigned long long>(p.fetchBuckets[0]),static_cast<unsigned long long>(p.fetchBuckets[1]),static_cast<unsigned long long>(p.fetchBuckets[2]),static_cast<unsigned long long>(p.fetchBuckets[3]),static_cast<unsigned long long>(p.fetchBuckets[4]));
         LogEvent(0,"physics.profile.submit",
             "simulate_avg_ms=%.3f population_avg_ms=%.3f post_fetch_avg_ms=%.3f",
             p.simulateSubmitMs*invSteps,p.populationSubmitMs*invSteps,p.postFetchCpuMs*invSteps);
@@ -437,7 +442,7 @@ void PhysicsRuntime::Impl::Scene::CollectTimings(){
     collect(stepTimings,"physics.step.gpu",1);
     collect(publicationTimings,"physics.publication.wait",0);
 }
-void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
+void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal){
     const double stepBegin=QpcNowSeconds();double commandWaitMs=0,topologyWaitMs=0,uploadSubmitMs=0,populationSubmitMs=0;
     bool forceDeviceCleared=false,forceHostUploaded=false;
     auto* timing=BeginTiming(stepTimings,stepTimingCursor,tick+1);
@@ -543,7 +548,9 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
     }
     double simulateBegin=QpcNowSeconds();scene->simulate(desc.fixedStepSeconds);
     double simulateMs=(QpcNowSeconds()-simulateBegin)*1000;
+    const double checkBegin=SessionLogCompact()?QpcNowSeconds():0.;
     bool resultsReady=scene->checkResults(false);PxU32 error=0;
+    const double checkMs=checkBegin>0?(QpcNowSeconds()-checkBegin)*1000.:0.;
     double fetchBegin=QpcNowSeconds();
     // Serial fixed steps require completed PhysX results before another simulate
     // or direct-GPU state query. Keep that required rendezvous explicit; do not
@@ -561,6 +568,11 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
         ++p.steps;p.stepCpuMs+=stepCpuMs;p.maxStepCpuMs=std::max(p.maxStepCpuMs,stepCpuMs);
         p.commandWaitMs+=commandWaitMs;p.topologyWaitMs+=topologyWaitMs;
         p.fetchBlocked+=!resultsReady;
+        const uint32_t ordinal=std::min(stepOrdinal,1u);
+        ++p.fetchByOrdinal[ordinal];p.fetchSumByOrdinalMs[ordinal]+=fetchMs;
+        p.fetchPeakByOrdinalMs[ordinal]=std::max(p.fetchPeakByOrdinalMs[ordinal],fetchMs);
+        ++p.fetchBuckets[fetchMs<0.5?0:fetchMs<1.?1:fetchMs<2.?2:fetchMs<4.?3:4];
+        p.checkResultsMs+=checkMs;
         if(resultsReady)p.fetchReadyMs+=fetchMs;else p.fetchBlockedMs+=fetchMs;
         p.simulateSubmitMs+=simulateMs;p.populationSubmitMs+=populationSubmitMs;p.postFetchCpuMs+=postFetchMs;
         p.deviceZeroSteps+=forceDeviceCleared;
@@ -596,7 +608,7 @@ void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
     accumulator=owed-discarded;
     populationSeconds+=std::max(0.,elapsed-discarded);uint32_t steps=0;
     uint32_t planned=std::min(desc.maxSubsteps,uint32_t((accumulator+1e-9)/desc.fixedStepSeconds));
-    while(accumulator+1e-9>=desc.fixedStepSeconds&&steps<desc.maxSubsteps){Step(float(steps+1)/float(std::max(1u,planned)));accumulator-=desc.fixedStepSeconds;++steps;}
+    while(accumulator+1e-9>=desc.fixedStepSeconds&&steps<desc.maxSubsteps){Step(float(steps+1)/float(std::max(1u,planned)),steps);accumulator-=desc.fixedStepSeconds;++steps;}
     alpha=float(std::clamp(accumulator/double(desc.fixedStepSeconds),0.,1.));
     if(descriptorsDirty&&started){Cuda(cudaStreamSynchronize(stream),"retire descriptor uploads");RefreshDescriptors();}
     if(started)QueueProbe();
