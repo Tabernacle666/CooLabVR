@@ -140,9 +140,10 @@ struct PhysicsRuntime::Impl {
         // Compact diagnostic, counters only; no GPU queries, waits or per-frame files.
         struct DiagnosticProfile {
             uint64_t frames{},steps{},fetchBlocked{},droppedFrames{};
+            uint64_t deviceZeroSteps{},hostUploadSteps{};
             double frameCpuMs{},stepCpuMs{},maxStepCpuMs{},contextLockMs{};
             double commandWaitMs{},fetchBlockedMs{},fetchReadyMs{},topologyWaitMs{};
-            double simulateSubmitMs{},populationSubmitMs{},postFetchCpuMs{};
+            double simulateSubmitMs{},populationSubmitMs{},postFetchCpuMs{},forceInitSubmitMs{};
         } diagnostic;
         LabGpuPublicationProviderV1 provider{};std::vector<LabU32> streamMaterials;
         Scene(Impl& r,Owner& o,LabPhysicsSceneV1 h,const LabPhysicsSceneDescV1& d):runtime(r),owner(o),handle(h),desc(d){}
@@ -228,6 +229,13 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
         LogEvent(0,"physics.profile.submit",
             "simulate_avg_ms=%.3f population_avg_ms=%.3f post_fetch_avg_ms=%.3f",
             p.simulateSubmitMs*invSteps,p.populationSubmitMs*invSteps,p.postFetchCpuMs*invSteps);
+        const uint64_t forceSteps=p.deviceZeroSteps+p.hostUploadSteps;
+        LogEvent(0,"physics.profile.transfer",
+            "device_zero_steps=%llu host_upload_steps=%llu active_force_steps=%llu force_init_submit_avg_ms=%.4f",
+            static_cast<unsigned long long>(p.deviceZeroSteps),
+            static_cast<unsigned long long>(p.hostUploadSteps),
+            static_cast<unsigned long long>(forceSteps),
+            forceSteps?p.forceInitSubmitMs/double(forceSteps):0.);
     }
     {PxScopedCudaLock lock(*runtime.cuda);DestroyPublications();Cuda(cudaStreamSynchronize(stream),"retire physics scene");
     cudaFreeHost(forceHost);cudaFreeHost(torqueHost);cudaFreeHost(editPoseHost);cudaFreeHost(editIndexHost);cudaFree(editPoseDevice);cudaFree(editIndexDevice);cudaFree(editZeroDevice);
@@ -377,17 +385,39 @@ void PhysicsRuntime::Impl::Scene::CollectTimings(){
 }
 void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
     const double stepBegin=QpcNowSeconds();double commandWaitMs=0,topologyWaitMs=0,uploadSubmitMs=0,populationSubmitMs=0;
+    bool forceDeviceCleared=false,forceHostUploaded=false;
     auto* timing=BeginTiming(stepTimings,stepTimingCursor,tick+1);
     if(!timing)++frameUntimedSteps;
     const bool rebuild=topologyDirty;
     if(started&&!rebuild&&dynamicCount){
-        std::fill_n(forceHost,desc.maxBodies,PxVec3(0));std::fill_n(torqueHost,desc.maxBodies,PxVec3(0));
-        for(auto& c:commands){auto* b=FindBody(c.body);if(!b||b->index==PhysicsInvalidIndex)continue;if(c.kind==LAB_PHYSICS_KINEMATIC_TARGET)continue;
-            float multiplier=(c.kind==LAB_PHYSICS_IMPULSE||c.kind==LAB_PHYSICS_ANGULAR_IMPULSE)?1.f/desc.fixedStepSeconds:1.f;
-            if(c.kind==LAB_PHYSICS_FORCE||c.kind==LAB_PHYSICS_IMPULSE)forceHost[b->index]+=V(c.value)*multiplier;else torqueHost[b->index]+=V(c.value)*multiplier;
+        // No explicit physical force is the common case: kinematic targets,
+        // airflow and aero all have their own inputs or GPU kernels. Do not
+        // clear pinned CPU arrays and upload them across PCIe for zero data.
+        // Keep the old host accumulation path for force/torque commands.
+        for(const auto& c:commands){
+            if(c.kind==LAB_PHYSICS_KINEMATIC_TARGET)continue;
+            auto* b=FindBody(c.body);if(!b||b->index==PhysicsInvalidIndex)continue;
+            if(!forceHostUploaded){
+                std::fill_n(forceHost,dynamicCount,PxVec3(0));
+                std::fill_n(torqueHost,dynamicCount,PxVec3(0));
+                forceHostUploaded=true;
+            }
+            const float multiplier=(c.kind==LAB_PHYSICS_IMPULSE||c.kind==LAB_PHYSICS_ANGULAR_IMPULSE)?1.f/desc.fixedStepSeconds:1.f;
+            if(c.kind==LAB_PHYSICS_FORCE||c.kind==LAB_PHYSICS_IMPULSE)forceHost[b->index]+=V(c.value)*multiplier;
+            else torqueHost[b->index]+=V(c.value)*multiplier;
         }
-        double uploadBegin=QpcNowSeconds();
-        Cuda(cudaMemcpyAsync(forces,forceHost,dynamicCount*sizeof(PxVec3),cudaMemcpyHostToDevice,stream),"upload grouped forces");Cuda(cudaMemcpyAsync(torques,torqueHost,dynamicCount*sizeof(PxVec3),cudaMemcpyHostToDevice,stream),"upload grouped torques");
+        const double uploadBegin=QpcNowSeconds();
+        const size_t forceBytes=size_t(dynamicCount)*sizeof(PxVec3);
+        if(forceHostUploaded){
+            Cuda(cudaMemcpyAsync(forces,forceHost,forceBytes,cudaMemcpyHostToDevice,stream),"upload grouped forces");
+            Cuda(cudaMemcpyAsync(torques,torqueHost,forceBytes,cudaMemcpyHostToDevice,stream),"upload grouped torques");
+        }else{
+            // Same GPU stream orders the zeroing before insect/airflow/aero
+            // kernels and before PhysX Direct GPU API consumes the arrays.
+            Cuda(cudaMemsetAsync(forces,0,forceBytes,stream),"reset GPU forces");
+            Cuda(cudaMemsetAsync(torques,0,forceBytes,stream),"reset GPU torques");
+            forceDeviceCleared=true;
+        }
         uploadSubmitMs=(QpcNowSeconds()-uploadBegin)*1000;
         const double populationBegin=SessionLogCompact()?QpcNowSeconds():0.;
         StepPopulation();
@@ -454,6 +484,9 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
         p.fetchBlocked+=!resultsReady;
         if(resultsReady)p.fetchReadyMs+=fetchMs;else p.fetchBlockedMs+=fetchMs;
         p.simulateSubmitMs+=simulateMs;p.populationSubmitMs+=populationSubmitMs;p.postFetchCpuMs+=postFetchMs;
+        p.deviceZeroSteps+=forceDeviceCleared;
+        p.hostUploadSteps+=forceHostUploaded;
+        p.forceInitSubmitMs+=uploadSubmitMs;
     }
     LogEvent(frame,"physics.step","scene=%llu tick=%llu cpu_ms=%.4f command_upload_submit_ms=%.4f command_wait_ms=%.4f topology_wait_ms=%.4f simulate_submit_ms=%.4f fetch_ms=%.4f fetch_blocking=%u gpu_timed=%u",static_cast<unsigned long long>(handle),static_cast<unsigned long long>(tick),stepCpuMs,uploadSubmitMs,commandWaitMs,topologyWaitMs,simulateMs,fetchMs,unsigned(!resultsReady),unsigned(timing!=nullptr));
     if(started&&!rebuild)std::erase_if(commands,[](const auto& c){return c.kind==LAB_PHYSICS_IMPULSE||c.kind==LAB_PHYSICS_ANGULAR_IMPULSE;});

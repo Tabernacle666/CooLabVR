@@ -153,9 +153,9 @@ try {
         $errors.Add('GPU/OpenXR performance profile incomplete')
         Note 'ERROR: missing GPU/OpenXR performance profile'
     }
-    if($gameExit -eq 0 -and $physicsProfile.Count -ne 3) {
-        $errors.Add("Physics telemetry incomplete: received $($physicsProfile.Count)/3 profile records")
-        Note "ERROR: expected three physics.profile records; received $($physicsProfile.Count)"
+    if($gameExit -eq 0 -and $physicsProfile.Count -ne 4) {
+        $errors.Add("Physics telemetry incomplete: received $($physicsProfile.Count)/4 profile records")
+        Note "ERROR: expected four physics.profile records; received $($physicsProfile.Count)"
     }
     $jpgs = @(Get-ChildItem -LiteralPath $images -Filter '*.jpg' -File -ErrorAction SilentlyContinue | Sort-Object Name)
     $complete = ($gameExit -eq 0 -and -not $forcedTermination -and $jpgs.Count -eq 2 -and $errors.Count -eq 0)

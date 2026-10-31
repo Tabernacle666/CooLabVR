@@ -137,3 +137,22 @@ individuelle par frame, **pas** l'étendue GPU totale. Les horloges Copy,
 Compute et Direct ne sont jamais soustraites entre elles. Un résultat de ce
 test ne justifie pas de désactiver définitivement le brouillard : il renseigne
 sur les étapes à optimiser sans perdre le phénomène visuel.
+
+
+### Optimisation CPU des transferts de forces PhysX
+
+Dans un sous-pas sans commande explicite de force ou de couple, les tableaux
+`forces` et `torques` sont remis à zéro par deux `cudaMemsetAsync` dans le
+flux CUDA déjà utilisé. Cela évite de remplir deux tableaux CPU épinglés et
+de les recopier sur le bus PCIe. Les commandes cinématiques n'exigent pas
+ce transfert. Dès qu'une force, impulsion ou un couple explicite existe,
+le chemin d'accumulation CPU + deux transferts H2D est conservé. Les noyaux
+de population, d'écoulement et d'aérodynamique fonctionnent ensuite sans
+changement, dans le même ordre GPU.
+
+La télémétrie `physics.profile.transfer` indique `device_zero_steps`,
+`host_upload_steps` et `force_init_submit_avg_ms`, pour vérifier que le
+chemin est effectivement emprunté et mesurer le temps de soumission CPU.
+Les quatre lignes `physics.profile.*` doivent figurer au manifeste.
+Les synchronisations PhysX `fetchResults` restent inchangées; un éventuel
+gain global doit être confirmé par un autre diagnostic Windows.
