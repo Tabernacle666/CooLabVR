@@ -30,7 +30,7 @@ LabPhysicsD6DescV1 Connection(LabPhysicsBodyV1 a,LabPhysicsBodyV1 b,LabPoseV1 pa
 }
 LabPhysicsCommandV1 Command(uint32_t kind,LabPhysicsBodyV1 body,XMFLOAT3 value){LabPhysicsCommandV1 c{};c.structSize=sizeof(c);c.kind=kind;c.body=body;c.value=V(value);c.target=PoseAt({0,0,0});return c;}
 }
-LabPhysicsBodyV1 HomePhysics::Body(const LabPhysicsBodyDescV1& d){LabPhysicsBodyV1 body{};Require(physics_->CreateBody(physics_->serviceContext,scene_,&d,&body),"Home physics_v1: body creation rejected");std::string id="body-"+std::to_string(entities_.size());entities_.push_back({id,id,body,d.pose,buildingGroup_});return body;}
+LabPhysicsBodyV1 HomePhysics::Body(const LabPhysicsBodyDescV1& d){LabPhysicsBodyV1 body{};Require(physics_->CreateBody(physics_->serviceContext,scene_,&d,&body),"Home physics_v1: body creation rejected");std::string id="body-"+std::to_string(entities_.size());entities_.push_back({id,id,body,d.pose,buildingGroup_});entities_.back().shape=d;entities_.back().shape.convexVertices=nullptr;return body;}
 LabPhysicsJointV1 HomePhysics::Joint(const LabPhysicsD6DescV1& d){LabPhysicsJointV1 joint{};Require(physics_->CreateD6(physics_->serviceContext,scene_,&d,&joint),"Home physics_v1: D6 creation rejected");auto id=[&](LabPhysicsBodyV1 h){for(const auto& e:entities_)if(e.body==h)return e.id;return std::string("world-anchor");};connections_.push_back({id(d.bodyA)+"--"+id(d.bodyB),joint,d.frameA,d.frameB,d.bodyA,d.bodyB});return joint;}
 void HomePhysics::Visual(LabPhysicsBodyV1 body,uint32_t mesh,Material material,XMFLOAT3 scale,LabPoseV1 local,uint32_t flags){LabPhysicsVisualV1 v{};v.structSize=sizeof(v);v.body=body;v.mesh=mesh;v.material=uint32_t(material);v.id=0x70000000u+uint32_t(visuals_.size());v.flags=flags;v.localPose=local;v.scale=V(scale);v.boundingRadius=Length(scale);visuals_.push_back(v);}
 void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
@@ -51,7 +51,10 @@ void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
     Require(input_->ResolveAction(input_->serviceContext,"interaction.physical",&physicalAction_),"Home input_v1: physical hand action unavailable");
     Require(input_->ResolveAction(input_->serviceContext,"interaction.grab",&grabAction_),"Home input_v1: grab action unavailable");
     sweepTracked_={};sweepVelocity_={};sweeps_={sizeof(sweeps_)};populationCount_=1;if(nextFlyAudioId_>=0x01000000u||nextFanAudioId_>0x00fffffcu)Fail("Home audio identity space exhausted");
-    flyAudioIds_={nextFlyAudioId_++};fanAudioBase_=nextFanAudioId_;nextFanAudioId_+=3;populationInput_={sizeof(LabPopulationInputV1),1};lampPower_=26;Build(assets);LabPhysicsBodyV1 probes[]{bulb_,socket_,pullSlider_,pullHandle_,fanRotor_};Require(physics_->SetProbes(physics_->serviceContext,scene_,probes,uint32_t(std::size(probes))),"Home physics_v1: behavior/audio probes rejected");
+    flyAudioIds_={nextFlyAudioId_++};fanAudioBase_=nextFanAudioId_;nextFanAudioId_+=3;populationInput_={sizeof(LabPopulationInputV1),1};lampPower_=26;Build(assets);
+    std::vector<LabPhysicsBodyV1> probes{bulb_,socket_,pullSlider_,pullHandle_,fanRotor_};
+    for(const auto& e:entities_)if(e.shape.kind==LAB_PHYSICS_DYNAMIC&&std::find(probes.begin(),probes.end(),e.body)==probes.end())probes.push_back(e.body);
+    Require(physics_->SetProbes(physics_->serviceContext,scene_,probes.data(),uint32_t(probes.size())),"Home physics_v1: behavior/audio probes rejected");
     provider_.structSize=sizeof(provider_);Require(physics_->GetVisualProvider(physics_->serviceContext,scene_,&provider_),"Home physics_v1: GPU visual provider unavailable");Require(gpu_->SetPublicationProvider(gpu_->serviceContext,&provider_),"Home gpu_v1: physical visual provider rejected");
     lastUpdateSeconds_=0;trackingRevision_=sourceFrame_=0;stateSeconds_=0;population_={};population_.structSize=sizeof(population_);population_.targetId=Invalid;states_={};visible_=true;pullArmed_=true;hands_={};grips_={};handTracked_={};handColliding_={};handBlocked_={};frozen_=false;selection_=0;simulationSeconds_=0;fanActualRpm_=0;
     panelPose_={{0,1.875f,3.96f},{0,0,0,1}};panelTheme_=panelFace_=0;panelSelected_=false;
@@ -95,10 +98,12 @@ void HomePhysics::Build(SceneData& assets){
     const char* roomIds[]{"room-floor","room-ceiling","room-zminus","room-xminus","room-xplus"};
     const char* furnitureIds[]{"table-top","table-leg-1","table-leg-2","table-leg-3","table-leg-4"};
     const char* furnitureNames[]{"Table top","Table leg 1","Table leg 2","Table leg 3","Table leg 4"};
-    uint32_t ordinal=0;
+    uint32_t ordinal=0;LabPhysicsBodyV1 tableTop{};XMFLOAT3 tableOrigin{};
     for(const auto& object:assets.objects){buildingGroup_=ordinal<5?0:1;
-        auto d=Description(LAB_PHYSICS_STATIC,LAB_PHYSICS_BOX,object.current.p,Scale(object.scale,.5f),0,RoomLayer);d.collisionGroup=ordinal<5?0x400u:0x300u;auto body=Body(d);
+        auto d=Description(ordinal<5?LAB_PHYSICS_STATIC:LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,object.current.p,Scale(object.scale,.5f),ordinal<5?0.f:(ordinal==5?8.f:1.f),RoomLayer);d.collisionGroup=ordinal<5?0x400u:0x300u;auto body=Body(d);
         entities_.back().id=ordinal<5?roomIds[ordinal]:furnitureIds[ordinal-5];entities_.back().name=ordinal<5?roomNames[ordinal]:furnitureNames[ordinal-5];entities_.back().acousticHalfExtent=d.dimensions;
+        if(ordinal==5){tableTop=body;tableOrigin=object.current.p;}
+        else if(ordinal>5)Joint(Connection(tableTop,body,PoseAt(Sub(object.current.p,tableOrigin)),PoseAt({0,0,0}),false));
         Visual(body,object.mesh,Material(object.material),object.scale,PoseAt({0,0,0}),object.flags);++ordinal;
     }
     assets.objects.clear();buildingGroup_=3;
@@ -146,11 +151,11 @@ void HomePhysics::Build(SceneData& assets){
     Joint(Connection(previous,pullHandle_,PoseAt({0,-chainPitch*.5f,0}),PoseAt({0,.025f,0}),true));
 
     buildingGroup_=4;
-    auto baseDesc=Description(LAB_PHYSICS_STATIC,LAB_PHYSICS_BOX,{-.85f,1.55f,1.35f},{.22f,.43f,.16f},0,RoomLayer);baseDesc.collisionGroup=0x300u;fanBase_=Body(baseDesc);entities_.back().id="fan-base";entities_.back().name="Fan stand / housing";
+    auto baseDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.55f,1.35f},{.215f,.025f,.17f},2.f,RoomLayer);baseDesc.shapePose.position={0,-.4f,0};fanBase_=Body(baseDesc);entities_.back().id="fan-base";entities_.back().name="Fan stand / housing";
     Visual(fanBase_,uint32_t(Mesh::Cylinder),Material::Steel,{.43f,.05f,.34f},PoseAt({0,-.4f,0}));
     Visual(fanBase_,uint32_t(Mesh::Box),Material::Steel,{.055f,.65f,.055f},PoseAt({0,-.06f,.08f}));
     Visual(fanBase_,uint32_t(Mesh::Cylinder),Material::Charcoal,{.44f,.06f,.44f},PoseAt({0,.32f,.055f},Rotation(XM_PIDIV2,0,0)));
-    auto rotorDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.87f,1.27f},{.17f,.025f,.009f},.06f,ChainLayer);rotorDesc.collisionMask=0;rotorDesc.angularDamping=.003f;rotorDesc.inertia={.0003f,.0003f,.0006f};fanRotor_=Body(rotorDesc);entities_.back().id="fan-rotor";entities_.back().name="Fan rotor / blades";
+    auto rotorDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,{-.85f,1.87f,1.27f},{.17f,.025f,.009f},.06f,ChainLayer);rotorDesc.collisionMask=RoomLayer|HandLayer;rotorDesc.angularDamping=.003f;rotorDesc.inertia={.0003f,.0003f,.0006f};fanRotor_=Body(rotorDesc);entities_.back().id="fan-rotor";entities_.back().name="Fan rotor / blades";
     for(uint32_t blade=0;blade<3;blade++){float angle=blade*XM_2PI/3;auto q=Rotation(0,0,angle);Visual(fanRotor_,uint32_t(Mesh::Box),Material::Steel,{.07f,.18f,.014f},PoseAt(Rotated({0,.10f,0},q),q));}
     Visual(fanRotor_,uint32_t(Mesh::Sphere),Material::Charcoal,{.06f,.06f,.04f});
     auto axle=Connection(fanBase_,fanRotor_,PoseAt({0,.32f,-.08f},Rotation(0,XM_PIDIV2,0)),PoseAt({0,0,0},Rotation(0,XM_PIDIV2,0)),false);
@@ -314,17 +319,35 @@ void HomePhysics::UpdateHands(const LabInputSnapshotV1& input,double dt,bool res
         if(!canInteract||!grabbing)ReleaseHand(hand,false);
         if(!hands_[hand]){
             auto d=Description(LAB_PHYSICS_KINEMATIC,LAB_PHYSICS_BOX,V(handTargets_[hand].position),{.038f,.020f,.071f},1,HandLayer);
-            d.pose=handTargets_[hand];d.shapePose.position={0,0,.026f};d.collisionMask=ChainLayer|InsectLayer;d.contactOffset=.002f;
+            d.pose=handTargets_[hand];d.shapePose.position={0,0,.026f};d.collisionMask=RoomLayer|ChainLayer|InsectLayer;d.contactOffset=.002f;
             hands_[hand]=Body(d);entities_.pop_back();handColliding_[hand]=true;
         }
         if(handColliding_[hand]!=enabled){Require(physics_->SetBodyCollisionEnabled(physics_->serviceContext,scene_,hands_[hand],enabled?1u:0u),"Home physics_v1: hand collision toggle rejected");handColliding_[hand]=enabled;}
-        // The press edge may precede the async probe; attach while held when
-        // the handle state becomes available and the hand is close enough.
-        if(canInteract&&grabbing&&!grips_[hand]&&!grips_[1-hand]&&sampled){
-            const auto& handle=states_[3];XMFLOAT3 offset=Sub(V(handle.pose.position),V(handTargets_[hand].position));
-            if(handle.body==pullHandle_&&Length(offset)<=handSettings_.grabRadius){
-                const auto& q=handTargets_[hand].orientation;XMFLOAT3 local;XMStoreFloat3(&local,XMVector3Rotate(XMLoadFloat3(&offset),XMQuaternionInverse(XMVectorSet(q.x,q.y,q.z,q.w))));
-                auto joint=Connection(hands_[hand],pullHandle_,PoseAt(local),PoseAt({0,0,0}),false);
+        // Both hands can independently attach to any dynamic physical shape.
+        // Choose the nearest collider surface, not its center (important for
+        // large table tops and for gripping a chain link where it is touched).
+        if(canInteract&&grabbing&&!grips_[hand]&&sampled){
+            const auto& h=handTargets_[hand];Pose handPose{V(h.position),{h.orientation.x,h.orientation.y,h.orientation.z,h.orientation.w}};
+            const XMFLOAT3 handPoint=Transform({0,0,.026f},handPose);float best=handSettings_.grabRadius;
+            LabPhysicsBodyV1 selected{};XMFLOAT3 selectedWorld{},selectedLocal{};
+            for(uint32_t index=0;index<stateCount_;++index){
+                const auto& state=states_[index];auto entity=std::find_if(entities_.begin(),entities_.end(),[&](const auto& e){return e.body==state.body;});
+                if(entity==entities_.end()||entity->shape.kind!=LAB_PHYSICS_DYNAMIC)continue;
+                const auto& s=entity->shape;Pose body{V(state.pose.position),{state.pose.orientation.x,state.pose.orientation.y,state.pose.orientation.z,state.pose.orientation.w}};
+                Pose shape{V(s.shapePose.position),{s.shapePose.orientation.x,s.shapePose.orientation.y,s.shapePose.orientation.z,s.shapePose.orientation.w}};
+                auto shapeWorld=Matrix(shape)*Matrix(body);XMFLOAT3 p;XMStoreFloat3(&p,XMVector3TransformCoord(XMLoadFloat3(&handPoint),XMMatrixInverse(nullptr,shapeWorld)));
+                XMFLOAT3 nearest{};
+                if(s.shape==LAB_PHYSICS_BOX){nearest={std::clamp(p.x,-s.dimensions.x,s.dimensions.x),std::clamp(p.y,-s.dimensions.y,s.dimensions.y),std::clamp(p.z,-s.dimensions.z,s.dimensions.z)};}
+                else if(s.shape==LAB_PHYSICS_SPHERE||s.shape==LAB_PHYSICS_CAPSULE){
+                    XMFLOAT3 center{s.shape==LAB_PHYSICS_CAPSULE?std::clamp(p.x,-s.dimensions.y,s.dimensions.y):0.f,0,0};
+                    auto delta=Sub(p,center);float len=Length(delta);nearest=len>s.dimensions.x?Add(center,Scale(delta,s.dimensions.x/len)):p;
+                }else continue;
+                XMFLOAT3 world;XMStoreFloat3(&world,XMVector3TransformCoord(XMLoadFloat3(&nearest),shapeWorld));float distance=Length(Sub(world,handPoint));
+                if(distance<=best){best=distance;selected=state.body;selectedWorld=world;XMStoreFloat3(&selectedLocal,XMVector3TransformCoord(XMLoadFloat3(&world),XMMatrixInverse(nullptr,Matrix(body))));}
+            }
+            if(selected){
+                XMFLOAT3 local;XMStoreFloat3(&local,XMVector3TransformCoord(XMLoadFloat3(&selectedWorld),XMMatrixInverse(nullptr,Matrix(handPose))));
+                auto joint=Connection(hands_[hand],selected,PoseAt(local),PoseAt(selectedLocal),false);
                 for(auto& motion:joint.motion)motion=LAB_PHYSICS_FREE;
                 for(uint32_t i=0;i<3;i++)joint.drive[i]={handSettings_.grabStiffness,handSettings_.grabDamping,handSettings_.grabMaxForce,0};
                 grips_[hand]=Joint(joint);connections_.pop_back();
@@ -345,7 +368,7 @@ void HomePhysics::Update(uint64_t frame,double now,std::span<const SceneLight> a
     captureStatus_.structSize=sizeof(captureStatus_);
     if(gpu_->GetCaptureStatus(gpu_->serviceContext,&captureStatus_)&&captureStatus_.requestId&&
        (captureStatus_.requestId!=previousRequest||captureStatus_.state!=previousState))status_=captureStatus_.message;
-    if(fresh){sourceFrame_=snapshot.sourceFrame;stateSeconds_=snapshot.simulationSeconds;simulationSeconds_=snapshot.simulationSeconds;if(states_[4].body==fanRotor_)fanActualRpm_=std::clamp(Length(V(states_[4].angularVelocity))*60.f/XM_2PI,0.f,2100.f);}
+    if(fresh){stateCount_=snapshot.stateCount;sourceFrame_=snapshot.sourceFrame;stateSeconds_=snapshot.simulationSeconds;simulationSeconds_=snapshot.simulationSeconds;if(states_[4].body==fanRotor_)fanActualRpm_=std::clamp(Length(V(states_[4].angularVelocity))*60.f/XM_2PI,0.f,2100.f);}
     if(SessionLogCompact()&&fresh&&now>=diagnosticMechanismAt_){
         diagnosticMechanismAt_=now+1.;
         const auto& q=states_[4].pose.orientation;

@@ -6,7 +6,7 @@
 #include "LaboVREdit.h"
 
 #define LABOVR_PHYSICS_SERVICE_VERSION_V1 1u
-#define LABOVR_PHYSICS_MAX_PROBES_V1 8u
+#define LABOVR_PHYSICS_MAX_PROBES_V1 128u
 
 typedef LabU64 LabPhysicsSceneV1;
 typedef LabU64 LabPhysicsBodyV1;

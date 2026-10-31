@@ -68,7 +68,20 @@ bool HomePhysics::ReadProfile(uint32_t scope,bool automatic){
         auto j=std::find_if(connections_.begin(),connections_.end(),[&](const auto& j){return j.id==id;});if(j==connections_.end()){status_="PROFILE UNKNOWN JOINT: "+id;return false;}
         if(std::any_of(anchors.begin(),anchors.end(),[&](const auto& a){return a.joint==j->joint;})){r.ok=false;break;}anchors.push_back({j->joint,a,b});if(anchors.size()>connections_.size())r.ok=false;
     }
-    if(anchors.size()!=connections_.size()){for(const auto& c:connections_)if(std::none_of(anchors.begin(),anchors.end(),[&](const auto& a){return a.joint==c.joint;})){status_="PROFILE MISSING JOINT: "+c.id;return false;}}
+    if(anchors.size()!=connections_.size()){for(const auto& c:connections_)if(std::none_of(anchors.begin(),anchors.end(),[&](const auto& a){return a.joint==c.joint;})){
+        // Profiles saved before the table became physical have no leg joints.
+        // Preserve their saved table layout and derive each fixed joint from it.
+        if(c.id.rfind("table-top--table-leg-",0)==0){
+            auto a=std::find_if(poses.begin(),poses.end(),[&](const auto& p){return p.body==c.bodyA;});
+            auto b=std::find_if(poses.begin(),poses.end(),[&](const auto& p){return p.body==c.bodyB;});
+            if(a==poses.end()||b==poses.end()){status_="PROFILE MISSING TABLE BODY";return false;}
+            const auto& ap=a->pose;const auto& bp=b->pose;
+            Pose pa{{ap.position.x,ap.position.y,ap.position.z},{ap.orientation.x,ap.orientation.y,ap.orientation.z,ap.orientation.w}};
+            Pose pb{{bp.position.x,bp.position.y,bp.position.z},{bp.orientation.x,bp.orientation.y,bp.orientation.z,bp.orientation.w}};
+            Pose relative=FromMatrix(Matrix(pb)*XMMatrixInverse(nullptr,Matrix(pa)));
+            anchors.push_back({c.joint,{{relative.p.x,relative.p.y,relative.p.z},{relative.q.x,relative.q.y,relative.q.z,relative.q.w}},{{0,0,0},{0,0,0,1}}});
+        }else{status_="PROFILE MISSING JOINT: "+c.id;return false;}
+    }}
     r.Need(',');r.Key("count");uint32_t count=r.Integer(LAB_PHYSICS_POPULATION_MAX_V1);r.Need(',');r.Key("lamp");bool lamp=r.Integer(1)!=0;
     auto flight=flight_;auto effects=effects_;auto fog=fog_;r.Need(',');r.Key("flight");auto fv=FlightValues(flight);r.Floats(fv.data(),fv.size());r.Need(',');r.Key("effects");auto ev=EffectValues(effects);r.Floats(ev.data(),ev.size());
     r.Need(',');r.Key("fogEnabled");fog.enabled=r.Integer(1);r.Need(',');r.Key("fogQuality");fog.quality=r.Integer(2);r.Need(',');r.Key("fog");auto gv=FogValues(fog);r.Floats(gv.data(),gv.size());

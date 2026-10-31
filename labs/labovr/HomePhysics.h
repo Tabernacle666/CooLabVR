@@ -17,7 +17,7 @@ class HomePhysics {
     const LabGpuServiceV1* gpu_{};
     const LabStorageServiceV1* storage_{};
     LabPhysicsSceneV1 scene_{};
-    struct Entity {std::string id,name;LabPhysicsBodyV1 body{};LabPoseV1 pose{};uint32_t group{};LabVec3V1 acousticHalfExtent{};};
+    struct Entity {std::string id,name;LabPhysicsBodyV1 body{};LabPoseV1 pose{};uint32_t group{};LabVec3V1 acousticHalfExtent{};LabPhysicsBodyDescV1 shape{};};
     struct ConnectionRecord {std::string id;LabPhysicsJointV1 joint{};LabPoseV1 frameA{},frameB{};LabPhysicsBodyV1 bodyA{},bodyB{};};
     struct Selection {LabU64 id{};std::string name;std::vector<LabPhysicsBodyV1> bodies;std::vector<LabPhysicsEditBodyV1> validBodies;std::vector<LabPhysicsEditJointV1> validJoints;};
     std::vector<Entity> entities_;std::vector<ConnectionRecord> connections_;std::vector<Selection> selections_;
@@ -55,7 +55,7 @@ class HomePhysics {
     std::array<LabPhysicsJointV1,2> grips_{};
     std::array<LabPoseV1,2> handTargets_{};
     std::array<bool,2> handTracked_{},handColliding_{},handBlocked_{};
-    std::array<LabPhysicsStateV1,8> states_{};
+    std::array<LabPhysicsStateV1,LABOVR_PHYSICS_MAX_PROBES_V1> states_{};uint32_t stateCount_{};
     LabInputActionHandleV1 handPose_{},physicalAction_{},grabAction_{};
     LabGpuPublicationProviderV1 provider_{};
     LabPhysicsLightV1 lampLight_{};
