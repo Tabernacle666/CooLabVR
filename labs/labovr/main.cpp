@@ -104,7 +104,9 @@ int RenderThread(Channels& io,const RunOptions& options) {
     const auto diagnosticViews=options.diagnosticSeconds?LoadDiagnosticViews(options.diagnosticCamerasFile):std::vector<DiagnosticView>{};
     constexpr LabU64 diagnosticOwner=0x444941474e4f5354ull;
     size_t diagnosticSlot=0;LabU64 diagnosticRequest=0;
-    double diagnosticSince=0,diagnosticStarted=QpcNowSeconds();
+    double diagnosticSince=0,diagnosticStarted=QpcNowSeconds(),diagnosticTravelStarted=0;
+    bool diagnosticTravelFinished=false;
+    constexpr double DiagnosticTravelSeconds=6.0;
     bool diagnosticFailed=false;
     uint64_t diagnosticFrames=0,diagnosticTracked=0,diagnosticSubmitted=0;
     double diagnosticCpuTotal=0,diagnosticCpuPeak=0,diagnosticPeriodMs=0;
@@ -230,7 +232,29 @@ int RenderThread(Channels& io,const RunOptions& options) {
         }
         if(frame.render){
             const bool captureHands=options.diagnosticSeconds&&diagnosticSlot<diagnosticViews.size();
-            if(captureHands){const auto& view=diagnosticViews[diagnosticSlot];home.SetDiagnosticHands(true,view.position,view.target);}
+            DiagnosticView diagnosticCamera{};
+            bool diagnosticAtView=true;
+            if(captureHands){
+                diagnosticCamera=diagnosticViews[diagnosticSlot];
+                if(diagnosticSlot==1&&!diagnosticTravelFinished){
+                    if(!diagnosticTravelStarted){
+                        diagnosticTravelStarted=QpcNowSeconds();
+                        LogEvent(frame.input.frameId,"sweep.travel.start","from=%s to=%s duration_s=%.1f",diagnosticViews[0].name.c_str(),diagnosticViews[1].name.c_str(),DiagnosticTravelSeconds);
+                    }
+                    const float t=float(std::clamp((QpcNowSeconds()-diagnosticTravelStarted)/DiagnosticTravelSeconds,0.0,1.0));
+                    const float eased=t*t*(3.f-2.f*t);
+                    const auto& a=diagnosticViews[0];const auto& b=diagnosticViews[1];
+                    const auto cameraPose=[](const DiagnosticView& v){
+                        return FromMatrix(XMMatrixInverse(nullptr,XMMatrixLookAtLH(XMLoadFloat3(&v.position),XMLoadFloat3(&v.target),XMVectorSet(0,1,0,0))));
+                    };
+                    const Pose travelPose=Blend(cameraPose(a),cameraPose(b),eased);
+                    diagnosticCamera.position=travelPose.p;
+                    diagnosticCamera.target=Transform({0,0,1},travelPose);
+                    diagnosticAtView=t>=1.f;
+                    if(diagnosticAtView){diagnosticTravelFinished=true;LogEvent(frame.input.frameId,"sweep.travel.end","elapsed_s=%.3f",QpcNowSeconds()-diagnosticTravelStarted);}
+                }
+                home.SetDiagnosticHands(true,diagnosticCamera.position,diagnosticCamera.target);
+            }
             else home.SetDiagnosticHands(false);
             bool prepared;
             {
@@ -258,14 +282,14 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 if(acquired){
                     if(options.diagnosticSeconds && diagnosticSlot<diagnosticViews.size()){
                         const auto& view=diagnosticViews[diagnosticSlot];
-                        xr.SetDiagnosticCamera(frame,view.position,view.target);
-                        if(!diagnosticSince){
+                        xr.SetDiagnosticCamera(frame,diagnosticCamera.position,diagnosticCamera.target);
+                        if(diagnosticAtView&&!diagnosticSince){
                             diagnosticSince=QpcNowSeconds();
                             LogEvent(frame.input.frameId,"sweep.view","slot=%u name=%s eye=%.3f,%.3f,%.3f target=%.3f,%.3f,%.3f",
                                 uint32_t(diagnosticSlot),view.name.c_str(),
                                 view.position.x,view.position.y,view.position.z,view.target.x,view.target.y,view.target.z);
                         }
-                        if(!diagnosticRequest&&QpcNowSeconds()-diagnosticSince>=3.0){
+                        if(diagnosticAtView&&!diagnosticRequest&&diagnosticSince&&QpcNowSeconds()-diagnosticSince>=3.0){
                             LabCaptureRequestV1 request{sizeof(LabCaptureRequestV1),0,1,0};LabU64 ticket=0;
                             if(!graphics.RequestCapture(diagnosticOwner,request,ticket)){
                                 LogEvent(frame.input.frameId,"sweep.capture.failed","slot=%u message=request_refused",uint32_t(diagnosticSlot));
