@@ -141,6 +141,8 @@ struct PhysicsRuntime::Impl {
         struct DiagnosticProfile {
             uint64_t frames{},steps{},fetchBlocked{},droppedFrames{};
             uint64_t deviceZeroSteps{},hostUploadSteps{};
+            uint64_t gpuStepSamples{},gpuFrameSamples{},untimedGpuSteps{};
+            double gpuStepSumMs{},gpuStepPeakMs{},gpuFrameSumMs{},gpuFramePeakMs{};
             double frameCpuMs{},stepCpuMs{},maxStepCpuMs{},contextLockMs{};
             double commandWaitMs{},fetchBlockedMs{},fetchReadyMs{},topologyWaitMs{};
             double simulateSubmitMs{},populationSubmitMs{},postFetchCpuMs{},forceInitSubmitMs{};
@@ -242,6 +244,18 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
     if(insects)cudaFree(insects);cudaFree(populationBodies);if(populationBodyPoses)cudaFree(populationBodyPoses);if(populationGrid)cudaFree(populationGrid);cudaFree(populationSummary);for(auto& r:populationReadbacks){cudaFreeHost(r.host);cudaEventDestroy(r.done);}
     for(auto& p:probeSlots){cudaFreeHost(p.host);cudaFreeHost(p.overflow);cudaEventDestroy(p.done);cudaEventDestroy(p.gpuBegin);cudaEventDestroy(p.gpuEnd);}
     CollectTimings();
+    if(SessionLogCompact()&&diagnostic.frames){
+        const auto& p=diagnostic;
+        LogEvent(0,"physics.profile.gpu",
+            "step_samples=%llu step_untimed=%llu step_avg_span_ms=%.3f step_peak_span_ms=%.3f frame_samples=%llu frame_avg_span_ms=%.3f frame_peak_span_ms=%.3f",
+            static_cast<unsigned long long>(p.gpuStepSamples),
+            static_cast<unsigned long long>(p.untimedGpuSteps),
+            p.gpuStepSamples?p.gpuStepSumMs/double(p.gpuStepSamples):0.,
+            p.gpuStepPeakMs,
+            static_cast<unsigned long long>(p.gpuFrameSamples),
+            p.gpuFrameSamples?p.gpuFrameSumMs/double(p.gpuFrameSamples):0.,
+            p.gpuFramePeakMs);
+    }
     for(auto pool:{std::span<Timing>(timings),std::span<Timing>(stepTimings),std::span<Timing>(publicationTimings)})for(auto& t:pool){cudaEventDestroy(t.begin);cudaEventDestroy(t.end);}
     for(void* p:{static_cast<void*>(airflowDevice),static_cast<void*>(dragDevice),static_cast<void*>(indices),static_cast<void*>(previous),static_cast<void*>(current),static_cast<void*>(velocity),static_cast<void*>(angular),static_cast<void*>(forces),static_cast<void*>(torques),static_cast<void*>(visualDevice),static_cast<void*>(lightDevice),static_cast<void*>(aeroDevice),static_cast<void*>(probeDevice),static_cast<void*>(actorDevice),static_cast<void*>(contacts),static_cast<void*>(contactCount),static_cast<void*>(probeOutput)})if(p)cudaFree(p);
     for(auto e:{uploadReady,poseReady,velocityReady,stateReady,forceReady,forceDone,torqueDone,contactReady})if(e)cuEventDestroy(e);if(stream)cudaStreamDestroy(stream);}
@@ -370,18 +384,31 @@ PhysicsRuntime::Impl::Scene::Timing* PhysicsRuntime::Impl::Scene::BeginTiming(st
     return nullptr; // Profiling never adds a blocking wait to the simulation.
 }
 void PhysicsRuntime::Impl::Scene::CollectTimings(){
-    auto collect=[&](std::span<Timing> pool,const char* stage){
+    auto collect=[&](std::span<Timing> pool,const char* stage,uint32_t kind){
         for(auto& t:pool)if(t.pending){
             auto ready=cudaEventQuery(t.end);if(ready==cudaErrorNotReady)continue;
             Cuda(ready,"query physical GPU timing");float span{};
             Cuda(cudaEventElapsedTime(&span,t.begin,t.end),"measure physical GPU span");
-            // These are elapsed GPU timeline spans, including dependencies and
-            // submission gaps. They are not a claim of exclusive CUDA compute time.
+            // Non-blocking event harvest: spans include CUDA stream dependencies
+            // and GPU scheduling gaps, not exclusively PhysX kernel execution.
+            if(SessionLogCompact()){
+                if(kind==1){
+                    ++diagnostic.gpuStepSamples;
+                    diagnostic.gpuStepSumMs+=span;
+                    diagnostic.gpuStepPeakMs=std::max(diagnostic.gpuStepPeakMs,double(span));
+                }else if(kind==2){
+                    ++diagnostic.gpuFrameSamples;
+                    diagnostic.gpuFrameSumMs+=span;
+                    diagnostic.gpuFramePeakMs=std::max(diagnostic.gpuFramePeakMs,double(span));
+                }
+            }
             LogEvent(t.frame,stage,"scene=%llu tick=%llu fence_value=%llu gpu_span_ms=%.4f",static_cast<unsigned long long>(handle),static_cast<unsigned long long>(t.tick),static_cast<unsigned long long>(t.value),span);
             t.pending=false;
         }
     };
-    collect(timings,"physics.gpu");collect(stepTimings,"physics.step.gpu");collect(publicationTimings,"physics.publication.wait");
+    collect(timings,"physics.gpu",2);
+    collect(stepTimings,"physics.step.gpu",1);
+    collect(publicationTimings,"physics.publication.wait",0);
 }
 void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
     const double stepBegin=QpcNowSeconds();double commandWaitMs=0,topologyWaitMs=0,uploadSubmitMs=0,populationSubmitMs=0;
@@ -486,6 +513,7 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
         p.simulateSubmitMs+=simulateMs;p.populationSubmitMs+=populationSubmitMs;p.postFetchCpuMs+=postFetchMs;
         p.deviceZeroSteps+=forceDeviceCleared;
         p.hostUploadSteps+=forceHostUploaded;
+        p.untimedGpuSteps+=timing==nullptr;
         p.forceInitSubmitMs+=uploadSubmitMs;
     }
     LogEvent(frame,"physics.step","scene=%llu tick=%llu cpu_ms=%.4f command_upload_submit_ms=%.4f command_wait_ms=%.4f topology_wait_ms=%.4f simulate_submit_ms=%.4f fetch_ms=%.4f fetch_blocking=%u gpu_timed=%u",static_cast<unsigned long long>(handle),static_cast<unsigned long long>(tick),stepCpuMs,uploadSubmitMs,commandWaitMs,topologyWaitMs,simulateMs,fetchMs,unsigned(!resultsReady),unsigned(timing!=nullptr));

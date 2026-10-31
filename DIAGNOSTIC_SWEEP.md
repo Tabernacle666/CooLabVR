@@ -156,3 +156,17 @@ chemin est effectivement emprunté et mesurer le temps de soumission CPU.
 Les quatre lignes `physics.profile.*` doivent figurer au manifeste.
 Les synchronisations PhysX `fetchResults` restent inchangées; un éventuel
 gain global doit être confirmé par un autre diagnostic Windows.
+
+
+### PhysX GPU chronométré sans synchronisation ajoutée
+
+La ligne `physics.profile.gpu` regroupe les mesures d'événements CUDA déjà
+placés autour des sous-pas et des frames. `step_samples` / `step_untimed`
+indiquent le taux de couverture; `step_avg_span_ms` et `frame_avg_span_ms`
+indiquent les temps d'attente observables sur le flux CUDA, en incluant
+ses dépendances et creux de soumission. Ces durées ne mesurent pas
+exclusivement les noyaux PhysX. Les échantillons sont relevés par
+`cudaEventQuery` pendant l'exécution; les derniers sont récoltés après
+le retrait normal de la simulation au moment de fermer la scène.
+Aucun nouveau `cudaEventSynchronize` n'est introduit.
+Le manifeste doit contenir cinq lignes `physics.profile.*`.
