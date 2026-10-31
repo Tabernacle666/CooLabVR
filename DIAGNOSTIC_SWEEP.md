@@ -83,3 +83,19 @@ seule fois et recopiées dans `manifest.json > performance_physics` :
 Ce ne sont pas des durées d'exécution GPU. Les valeurs sont agrégées en mémoire
 et n'ajoutent aucune requête GPU ni synchronisation. La télémétrie capture le
 coût CPU des opérations existantes, sans enregistrer les frames une par une.
+
+
+## Politique PhysX anti-emballement
+
+Le laboratoire utilise désormais 120 Hz avec au maximum deux sous-pas fixes
+par frame XR (au lieu de 240 Hz / huit sous-pas). Le scheduler élimine le
+temps de simulation excédentaire plutôt que de le reporter d'une frame à
+l'autre. Il préserve uniquement la fraction de pas nécessaire pour aligner
+la fréquence VR et la fréquence physique. `dropped_frames` et `dropped_s`
+quantifient les surcharges et pertes de temps simulé.
+
+Cela ne supprime pas l'attente `fetchResults` exigée pour réutiliser les
+résultats PhysX : cela borne son nombre d'occurrences par frame.
+Le passage à 120 Hz peut changer légèrement la stabilité et les mouvements
+des joints/chaînes. Comparer les captures et vérifier le comportement de la
+lampe, du ventilateur et des mouches au prochain diagnostic.

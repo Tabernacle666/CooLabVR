@@ -42,7 +42,11 @@ void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
     audio_=static_cast<const LabAudioServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_AUDIO_V1,1));
     gpu_=static_cast<const LabGpuServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_GPU_V1,1));
     if(!storage_||storage_->structSize<sizeof(*storage_)||!physics_||physics_->version!=1||physics_->structSize<sizeof(*physics_)||!physics_->CreatePopulation||!physics_->PollPopulation||!physics_->SetPopulationEffects||!physics_->SetPopulationHands||!physics_->SetBodyCollisionEnabled||!input_||input_->structSize<sizeof(*input_)||!input_->GetPhysicalSources||!input_->SetBooleanSources||!audio_||audio_->structSize<sizeof(*audio_)||!audio_->SetAcousticBoxes||!gpu_||gpu_->structSize<sizeof(*gpu_)||!gpu_->SetFogSettings||!gpu_->SetFogInput||!gpu_->SetPopulationOpticalSettings||!gpu_->RequestCapture||!gpu_->GetCaptureStatus||!gpu_->SetAntialiasing||!gpu_->SetFogTransport||!gpu_->SetSurfaceSettings||!gpu_->SetMultisampling||!physics_->SetAirflows||!physics_->SetPopulationSpace)Fail("Home requires SDK physics_v1/input_v1/audio_v1/gpu_v1");
-    LabPhysicsSceneDescV1 scene{sizeof(scene),128,{0,-9.81f,0},1.f/240.f,8,0};Require(physics_->CreateScene(physics_->serviceContext,&scene,&scene_),"Home physics_v1: scene creation failed");
+    // Bound GPU PhysX synchronization to at most two fixed steps per rendered
+    // frame. An 8 x 240 Hz catch-up loop can amplify frame overruns: each
+    // substep blocks on fetchResults(), then the next frame tries to catch up.
+    // 120 Hz preserves a fixed integration step; overdue time is discarded.
+    LabPhysicsSceneDescV1 scene{sizeof(scene),128,{0,-9.81f,0},1.f/120.f,2,0};Require(physics_->CreateScene(physics_->serviceContext,&scene,&scene_),"Home physics_v1: scene creation failed");
     Require(input_->ResolveAction(input_->serviceContext,"tracking.hand_pose",&handPose_),"Home input_v1: existing hand pose unavailable");
     Require(input_->ResolveAction(input_->serviceContext,"interaction.physical",&physicalAction_),"Home input_v1: physical hand action unavailable");
     Require(input_->ResolveAction(input_->serviceContext,"interaction.grab",&grabAction_),"Home input_v1: grab action unavailable");

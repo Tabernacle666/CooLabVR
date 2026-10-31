@@ -139,7 +139,7 @@ struct PhysicsRuntime::Impl {
         uint32_t frameUntimedSteps{};
         // Compact diagnostic, counters only; no GPU queries, waits or per-frame files.
         struct DiagnosticProfile {
-            uint64_t frames{},steps{},fetchBlocked{},cappedFrames{};
+            uint64_t frames{},steps{},fetchBlocked{},droppedFrames{};
             double frameCpuMs{},stepCpuMs{},maxStepCpuMs{},contextLockMs{};
             double commandWaitMs{},fetchBlockedMs{},fetchReadyMs{},topologyWaitMs{};
             double simulateSubmitMs{},populationSubmitMs{},postFetchCpuMs{};
@@ -218,9 +218,9 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
         const auto& p=diagnostic;
         const double invFrames=1./double(p.frames),invSteps=p.steps?1./double(p.steps):0.;
         LogEvent(0,"physics.profile.cpu",
-            "frames=%llu steps=%llu steps_per_frame=%.3f capped_frames=%llu dropped_s=%.6f frame_avg_ms=%.3f step_avg_ms=%.3f step_peak_ms=%.3f lock_avg_ms=%.3f",
+            "frames=%llu steps=%llu steps_per_frame=%.3f fixed_dt_ms=%.3f max_substeps=%u dropped_frames=%llu dropped_s=%.6f frame_avg_ms=%.3f step_avg_ms=%.3f step_peak_ms=%.3f lock_avg_ms=%.3f",
             static_cast<unsigned long long>(p.frames),static_cast<unsigned long long>(p.steps),
-            double(p.steps)*invFrames,static_cast<unsigned long long>(p.cappedFrames),
+            double(p.steps)*invFrames,double(desc.fixedStepSeconds)*1000.,desc.maxSubsteps,static_cast<unsigned long long>(p.droppedFrames),
             droppedSeconds,p.frameCpuMs*invFrames,p.stepCpuMs*invSteps,p.maxStepCpuMs,p.contextLockMs*invFrames);
         LogEvent(0,"physics.profile.wait",
             "fetch_blocked_steps=%llu fetch_blocked_total_ms=%.3f fetch_ready_total_ms=%.3f command_wait_total_ms=%.3f topology_wait_total_ms=%.3f",
@@ -466,12 +466,22 @@ void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
     CollectTimings();auto* timing=BeginTiming(timings,timingCursor);
     if(insectCapacity&&!populationClockStarted){populationClockOrigin=now;populationClockStarted=true;}
     double elapsed=lastTime>0?std::max(0.,now-lastTime):double(desc.fixedStepSeconds);lastTime=now;
-    double budget=double(desc.fixedStepSeconds)*desc.maxSubsteps;
-    // Discard suspension/catch-up excess. No large dt and no catch-up impulse;
-    // the exact amount discarded is visible in the ordinary diagnostic stream.
-    if(elapsed>budget){droppedSeconds+=elapsed-budget;elapsed=budget;}
-    populationSeconds+=elapsed;
-    accumulator=std::min(accumulator+elapsed,budget);uint32_t steps=0;
+    const double budget=double(desc.fixedStepSeconds)*desc.maxSubsteps;
+    const double droppedBefore=droppedSeconds;
+    // Never carry whole overdue steps into later frames. A CPU/GPU stall
+    // must not create extra PhysX fetchResults waits on the next frame.
+    // Retain only the fractional remainder needed to align 72/90 Hz XR
+    // frames with the fixed 120 Hz physics clock.
+    const double owed=accumulator+elapsed;
+    // When two steps are sufficient, keep their fractional remainder untouched.
+    // Only whole extra steps are discarded; otherwise even healthy 72 Hz XR
+    // would lose simulation time at every alternate frame.
+    double discarded=0.;
+    if(owed>=budget+double(desc.fixedStepSeconds))
+        discarded=std::floor((owed-budget)/double(desc.fixedStepSeconds))*double(desc.fixedStepSeconds);
+    droppedSeconds+=discarded;
+    accumulator=owed-discarded;
+    populationSeconds+=std::max(0.,elapsed-discarded);uint32_t steps=0;
     uint32_t planned=std::min(desc.maxSubsteps,uint32_t((accumulator+1e-9)/desc.fixedStepSeconds));
     while(accumulator+1e-9>=desc.fixedStepSeconds&&steps<desc.maxSubsteps){Step(float(steps+1)/float(std::max(1u,planned)));accumulator-=desc.fixedStepSeconds;++steps;}
     alpha=float(std::clamp(accumulator/double(desc.fixedStepSeconds),0.,1.));
@@ -484,7 +494,7 @@ void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
     if(steps)std::erase_if(commands,[](const auto& c){return c.kind!=LAB_PHYSICS_IMPULSE&&c.kind!=LAB_PHYSICS_ANGULAR_IMPULSE;});
     const double frameCpuMs=(QpcNowSeconds()-begin)*1000.;
     if(SessionLogCompact()){
-        ++diagnostic.frames;diagnostic.cappedFrames+=steps==desc.maxSubsteps;
+        ++diagnostic.frames;diagnostic.droppedFrames+=droppedSeconds>droppedBefore;
         diagnostic.frameCpuMs+=frameCpuMs;diagnostic.contextLockMs+=contextLockMs;
     }
     LogEvent(frame,"physics.frame","scene=%llu tick=%llu steps=%u fixed_dt=%.8f cpu_ms=%.4f context_lock_ms=%.4f command_wait_ms=%.4f fetch_blocking_call_ms=%.4f topology_wait_ms=%.4f untimed_gpu_steps=%u frame_gpu_timed=%u publication_backpressure_total=%llu dropped_seconds=%.6f probe_count=%u readback_bytes=%u",static_cast<unsigned long long>(handle),static_cast<unsigned long long>(tick),steps,desc.fixedStepSeconds,frameCpuMs,contextLockMs,frameCommandWaitMs,frameFetchBlockingMs,frameTopologyWaitMs,frameUntimedSteps,unsigned(timing!=nullptr),static_cast<unsigned long long>(publicationBackpressureCount),droppedSeconds,uint32_t(probeHost.size()),uint32_t(probeHost.size()*sizeof(LabPhysicsStateV1)+sizeof(uint32_t)));
