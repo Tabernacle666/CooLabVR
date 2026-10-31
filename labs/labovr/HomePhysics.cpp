@@ -146,7 +146,7 @@ void HomePhysics::Build(SceneData& assets){
     Joint(Connection(previous,pullHandle_,PoseAt({0,-chainPitch*.5f,0}),PoseAt({0,.025f,0}),true));
 
     buildingGroup_=4;
-    auto baseDesc=Description(LAB_PHYSICS_STATIC,LAB_PHYSICS_BOX,{-.85f,1.55f,1.35f},{.22f,.43f,.16f},0,RoomLayer);fanBase_=Body(baseDesc);entities_.back().id="fan-base";entities_.back().name="Fan stand / housing";
+    auto baseDesc=Description(LAB_PHYSICS_STATIC,LAB_PHYSICS_BOX,{-.85f,1.55f,1.35f},{.22f,.43f,.16f},0,RoomLayer);baseDesc.collisionGroup=0x300u;fanBase_=Body(baseDesc);entities_.back().id="fan-base";entities_.back().name="Fan stand / housing";
     Visual(fanBase_,uint32_t(Mesh::Cylinder),Material::Steel,{.43f,.05f,.34f},PoseAt({0,-.4f,0}));
     Visual(fanBase_,uint32_t(Mesh::Box),Material::Steel,{.055f,.65f,.055f},PoseAt({0,-.06f,.08f}));
     Visual(fanBase_,uint32_t(Mesh::Cylinder),Material::Charcoal,{.44f,.06f,.44f},PoseAt({0,.32f,.055f},Rotation(XM_PIDIV2,0,0)));
@@ -318,7 +318,9 @@ void HomePhysics::UpdateHands(const LabInputSnapshotV1& input,double dt,bool res
             hands_[hand]=Body(d);entities_.pop_back();handColliding_[hand]=true;
         }
         if(handColliding_[hand]!=enabled){Require(physics_->SetBodyCollisionEnabled(physics_->serviceContext,scene_,hands_[hand],enabled?1u:0u),"Home physics_v1: hand collision toggle rejected");handColliding_[hand]=enabled;}
-        if(canInteract&&grabbing&&!grips_[hand]&&!grips_[1-hand]&&sampled&&grab&&(grab->flags&LABOVR_INPUT_SAMPLE_PRESSED_V1)){
+        // The press edge may precede the async probe; attach while held when
+        // the handle state becomes available and the hand is close enough.
+        if(canInteract&&grabbing&&!grips_[hand]&&!grips_[1-hand]&&sampled){
             const auto& handle=states_[3];XMFLOAT3 offset=Sub(V(handle.pose.position),V(handTargets_[hand].position));
             if(handle.body==pullHandle_&&Length(offset)<=handSettings_.grabRadius){
                 const auto& q=handTargets_[hand].orientation;XMFLOAT3 local;XMStoreFloat3(&local,XMVector3Rotate(XMLoadFloat3(&offset),XMQuaternionInverse(XMVectorSet(q.x,q.y,q.z,q.w))));
@@ -344,6 +346,12 @@ void HomePhysics::Update(uint64_t frame,double now,std::span<const SceneLight> a
     if(gpu_->GetCaptureStatus(gpu_->serviceContext,&captureStatus_)&&captureStatus_.requestId&&
        (captureStatus_.requestId!=previousRequest||captureStatus_.state!=previousState))status_=captureStatus_.message;
     if(fresh){sourceFrame_=snapshot.sourceFrame;stateSeconds_=snapshot.simulationSeconds;simulationSeconds_=snapshot.simulationSeconds;if(states_[4].body==fanRotor_)fanActualRpm_=std::clamp(Length(V(states_[4].angularVelocity))*60.f/XM_2PI,0.f,2100.f);}
+    if(SessionLogCompact()&&fresh&&now>=diagnosticMechanismAt_){
+        diagnosticMechanismAt_=now+1.;
+        const auto& q=states_[4].pose.orientation;
+        LogEvent(frame,"home.mechanisms","frozen=%u fan_enabled=%u set_rpm=%.1f actual_rpm=%.1f rotor_q=%.4f,%.4f,%.4f,%.4f grip_l=%u grip_r=%u lamp=%u",
+            unsigned(frozen_),unsigned(fanEnabled_),fanRpm_,fanActualRpm_,q.x,q.y,q.z,q.w,unsigned(grips_[0]!=0),unsigned(grips_[1]!=0),unsigned(LampEnabled()));
+    }
     bool sampled=sourceFrame_&&sourceFrame_<=frame&&frame-sourceFrame_<6;
     UpdateHands(input,dt,trackingReset,sampled,commands);
     if(fresh&&visible_&&!frozen_&&states_[1].body==socket_&&states_[2].body==pullSlider_){

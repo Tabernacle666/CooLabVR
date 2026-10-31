@@ -849,6 +849,9 @@ uint32_t PhysicsRuntime::Impl::Scene::ValidateEdit(LabPhysicsEditValidationV1* o
     }
     for(size_t i=0;i<bodies.size();i++)for(size_t k=i+1;k<bodies.size();k++){
         auto& a=bodies[i];auto& b=bodies[k];if(!a.actor||!b.actor||!a.collisionEnabled||!b.collisionEnabled)continue;
+        // Existing static/static intersections are not PhysX contacts and
+        // must not block an unrelated edit. Still validate moved statics.
+        if(a.actor->is<PxRigidStatic>()&&b.actor->is<PxRigidStatic>()&&!PoseChanged(a.initial,a.committed)&&!PoseChanged(b.initial,b.committed))continue;
         if(!(a.geometry.layer&b.collisionMask)||!(b.geometry.layer&a.collisionMask)||(a.geometry.collisionGroup&&a.geometry.collisionGroup==b.geometry.collisionGroup))continue;
         bool connected=false;for(auto& j:joints)if(j.joint&&!j.description.collideConnected&&((j.description.bodyA==a.handle&&j.description.bodyB==b.handle)||(j.description.bodyA==b.handle&&j.description.bodyB==a.handle))){connected=true;break;}if(connected)continue;
         PxShape *sa{},*sb{};if(a.actor->getShapes(&sa,1)!=1||b.actor->getShapes(&sb,1)!=1)continue;PxVec3 direction;PxReal depth;

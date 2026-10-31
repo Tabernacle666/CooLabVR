@@ -106,7 +106,11 @@ bool HomePhysics::ReadProfile(uint32_t scope,bool automatic){
     bool wasFrozen=frozen_;if(!wasFrozen&&!SetFrozen(true))return false;
     LabPhysicsEditBatchV1 batch{sizeof(batch),uint32_t(poses.size()),poses.data(),uint32_t(anchors.size()),0,anchors.data()};
     if(!physics_->ApplyEdit(physics_->serviceContext,scene_,&batch)){
-        RefreshEditor();status_=version==1?"V1 MIGRATION BLOCKED: PHYSICAL LAYOUT / JOINT ANCHORS":"PROFILE BLOCKED: PHYSICAL LAYOUT / JOINT ANCHORS";return false;
+        RefreshEditor();
+        // ApplyEdit rolls back the candidate. Restore the running state we
+        // entered with instead of silently freezing the simulation on load.
+        if(!wasFrozen&&!SetFrozen(false))Fail("Home physics_v1: resume after rejected profile failed");
+        status_=version==1?"V1 MIGRATION BLOCKED: PHYSICAL LAYOUT / JOINT ANCHORS":"PROFILE BLOCKED: PHYSICAL LAYOUT / JOINT ANCHORS";return false;
     }
     multisampling_=multisampling;populationSpace_=space;if(!physics_->SetPopulationSpace(physics_->serviceContext,scene_,&populationSpace_))Fail("Home physics_v1: profile flight volume rejected");
     antialiasing_=aa;transport_=transport;wind_.radius=jet.radius;wind_.length=jet.length;wind_.dissipation=jet.dissipation;surfaces_=surfaces;PublishRendering();
