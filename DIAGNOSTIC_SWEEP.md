@@ -170,3 +170,16 @@ exclusivement les noyaux PhysX. Les échantillons sont relevés par
 le retrait normal de la simulation au moment de fermer la scène.
 Aucun nouveau `cudaEventSynchronize` n'est introduit.
 Le manifeste doit contenir cinq lignes `physics.profile.*`.
+
+
+### Suppression des réécritures identiques des moteurs D6
+
+Les cibles et vitesses des drives PhysX sont persistantes. Si la cible
+et les vitesses sont exactement identiques à celles déjà soumises, la boucle
+fixe ne rappelle plus `setDrivePosition` / `setDriveVelocity`. Une cible
+animée (`frequencyHz > 0`) est toujours mise à jour à chaque sous-pas;
+une modification de la configuration du joint invalide le cache. La nouvelle
+ligne `physics.profile.motor` donne `writes` et `unchanged_skips`.
+Les six lignes `physics.profile.*` sont requises dans le manifeste.
+Cette optimisation évite des modifications de contraintes inutiles, mais
+le gain GPU/CPU doit être évalué sur le prochain diagnostic Windows.

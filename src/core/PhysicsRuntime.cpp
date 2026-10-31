@@ -92,7 +92,16 @@ struct PhysicsRuntime::Impl {
     PxFoundation* foundation{};PxPhysics* physics{};PxCudaContextManager* cuda{};PxDefaultCpuDispatcher* dispatcher{};bool extensions{};
     uint32_t nextGeneration{1};uint64_t nextOwner{1},nextLeaseGeneration{1};
     struct Body {LabPhysicsBodyV1 handle{};PxRigidActor* actor{};PxMaterial* material{};PxConvexMesh* convex{};PxTransform initial{PxIdentity},committed{PxIdentity};uint32_t index{PhysicsInvalidIndex},collisionMask{};LabPhysicsBodyDescV1 geometry{};bool kinematic{},collisionEnabled{true};PxTransform lastTarget{PxIdentity};};
-    struct Joint {LabPhysicsJointV1 handle{};PxD6Joint* joint{};LabPhysicsMotorV1 motor{};LabPhysicsD6DescV1 description{};LabPoseV1 committedFrameA{},committedFrameB{};double motorPhase{};};
+    struct Joint {
+        LabPhysicsJointV1 handle{};PxD6Joint* joint{};LabPhysicsMotorV1 motor{};
+        LabPhysicsD6DescV1 description{};LabPoseV1 committedFrameA{},committedFrameB{};
+        double motorPhase{};
+        // PhysX joint drive targets persist until changed; a repeated setter
+        // unnecessarily dirties the constraint on each 120 Hz substep.
+        bool lastDriveValid{};
+        PxTransform lastDrivePosition{PxIdentity};
+        PxVec3 lastDriveLinear{},lastDriveAngular{};
+    };
     struct Scene {
         Impl& runtime;Owner& owner;LabPhysicsSceneV1 handle{};LabPhysicsSceneDescV1 desc{};PxScene* scene{};
         cudaStream_t stream{};CUevent uploadReady{},poseReady{},velocityReady{},stateReady{},forceReady{},forceDone{},torqueDone{},contactReady{};
@@ -142,6 +151,7 @@ struct PhysicsRuntime::Impl {
             uint64_t frames{},steps{},fetchBlocked{},droppedFrames{};
             uint64_t deviceZeroSteps{},hostUploadSteps{};
             uint64_t gpuStepSamples{},gpuFrameSamples{},untimedGpuSteps{};
+            uint64_t motorWrites{},motorUnchangedSkips{};
             double gpuStepSumMs{},gpuStepPeakMs{},gpuFrameSumMs{},gpuFramePeakMs{};
             double frameCpuMs{},stepCpuMs{},maxStepCpuMs{},contextLockMs{};
             double commandWaitMs{},fetchBlockedMs{},fetchReadyMs{},topologyWaitMs{};
@@ -231,6 +241,11 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
         LogEvent(0,"physics.profile.submit",
             "simulate_avg_ms=%.3f population_avg_ms=%.3f post_fetch_avg_ms=%.3f",
             p.simulateSubmitMs*invSteps,p.populationSubmitMs*invSteps,p.postFetchCpuMs*invSteps);
+        LogEvent(0,"physics.profile.motor",
+            "writes=%llu unchanged_skips=%llu total_considered=%llu",
+            static_cast<unsigned long long>(p.motorWrites),
+            static_cast<unsigned long long>(p.motorUnchangedSkips),
+            static_cast<unsigned long long>(p.motorWrites+p.motorUnchangedSkips));
         const uint64_t forceSteps=p.deviceZeroSteps+p.hostUploadSteps;
         LogEvent(0,"physics.profile.transfer",
             "device_zero_steps=%llu host_upload_steps=%llu active_force_steps=%llu force_init_submit_avg_ms=%.4f",
@@ -343,6 +358,7 @@ uint32_t PhysicsRuntime::Impl::Scene::ConfigureD6(LabPhysicsJointV1 h,const LabP
     else{joint->setDrive(PxD6Drive::eSWING1,drive(LAB_PHYSICS_DRIVE_SWING));joint->setDrive(PxD6Drive::eSWING2,drive(LAB_PHYSICS_DRIVE_SWING));joint->setDrive(PxD6Drive::eTWIST,drive(LAB_PHYSICS_DRIVE_TWIST));}
     joint->setConstraintFlag(PxConstraintFlag::eCOLLISION_ENABLED,d.collideConnected!=0);
     j->description=d;j->committedFrameA=d.frameA;j->committedFrameB=d.frameB;
+    j->lastDriveValid=false;
     return 1;
 }
 uint32_t PhysicsRuntime::Impl::Scene::DestroyJoint(LabPhysicsJointV1 h){auto* j=FindJoint(h);if(!j)return 0;j->joint->release();*j={};return 1;}
@@ -487,7 +503,32 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
             omega.x=j.motor.amplitudeRadians*j.motor.frequencyHz*float(tau)*float(std::cos(phase));
             j.motorPhase=std::fmod(j.motorPhase+double(j.motor.frequencyHz)*tau*desc.fixedStepSeconds,tau);
         }
-        j.joint->setDrivePosition(target,false);j.joint->setDriveVelocity(V(j.motor.linearVelocity),omega,false);
+        const PxVec3 linear=V(j.motor.linearVelocity);
+        const bool unchanged=j.motor.frequencyHz==0&&j.lastDriveValid
+            &&target.p.x==j.lastDrivePosition.p.x
+            &&target.p.y==j.lastDrivePosition.p.y
+            &&target.p.z==j.lastDrivePosition.p.z
+            &&target.q.x==j.lastDrivePosition.q.x
+            &&target.q.y==j.lastDrivePosition.q.y
+            &&target.q.z==j.lastDrivePosition.q.z
+            &&target.q.w==j.lastDrivePosition.q.w
+            &&linear.x==j.lastDriveLinear.x
+            &&linear.y==j.lastDriveLinear.y
+            &&linear.z==j.lastDriveLinear.z
+            &&omega.x==j.lastDriveAngular.x
+            &&omega.y==j.lastDriveAngular.y
+            &&omega.z==j.lastDriveAngular.z;
+        if(unchanged){
+            if(SessionLogCompact())++diagnostic.motorUnchangedSkips;
+            continue;
+        }
+        j.joint->setDrivePosition(target,false);
+        j.joint->setDriveVelocity(linear,omega,false);
+        j.lastDrivePosition=target;
+        j.lastDriveLinear=linear;
+        j.lastDriveAngular=omega;
+        j.lastDriveValid=true;
+        if(SessionLogCompact())++diagnostic.motorWrites;
     }
     double simulateBegin=QpcNowSeconds();scene->simulate(desc.fixedStepSeconds);
     double simulateMs=(QpcNowSeconds()-simulateBegin)*1000;
