@@ -97,7 +97,10 @@ try {
         $gpuLines = @($lines | Where-Object { $_ -match '\tsweep\.gpu\t' } | Select-Object -Last 1)
         if($cpuLines.Count) { $cpuMetrics = [string]$cpuLines[0] }
         if($gpuLines.Count) { $gpuMetrics = [string]$gpuLines[0] }
-        $physicsProfile = @($lines | Where-Object { $_ -match '\tphysics\.profile\.' })
+        # Get-Content attaches PSPath/PSDrive notes to each string. Force bare strings,
+        # otherwise ConvertTo-Json recursively serializes the entire provider graph.
+        $physicsProfile = @($lines | Where-Object { $_ -match '\tphysics\.profile\.' } |
+            ForEach-Object { [string]::Copy($_.ToString()) })
         $lines | Where-Object { $_ -match 'sweep\.(start|view|capture|summary|timeout)' } |
             Set-Content -LiteralPath (Join-Path $runDir 'capture_index.txt') -Encoding UTF8
     }
