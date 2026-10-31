@@ -110,10 +110,16 @@ void FogIntegrate(uint3 id:SV_DispatchThreadID){
         float3 incident=float3(.004,.006,.009);
         if(lit&&light.colorPower.w>0){
             float3 delta=light.positionRadius.xyz-p;float distance=length(delta);float3 direction=delta/max(distance,.001);
-            float falloff=pow(saturate(1-pow(distance/light.positionRadius.w,4)),2)/max(.035,distance*distance);
+            // Exact algebraic powers: avoid generic pow() inside each fog
+            // raymarch sample without changing step count or light transport.
+            float rangeRatio=distance/light.positionRadius.w;
+            float rangeRatioSq=rangeRatio*rangeRatio;
+            float falloffBase=saturate(1-rangeRatioSq*rangeRatioSq);
+            float falloff=(falloffBase*falloffBase)/max(.035,distance*distance);
             if(light.directionOuter.w>-1)falloff*=saturate((dot(-direction,light.directionOuter.xyz)-light.directionOuter.w)/max(.00001,light.parameters.x-light.directionOuter.w));
             if(k%8==0)visibility=VolumeShadow(p,light);
-            float phase=(1-g*g)/(4*Pi*pow(max(.01,1+g*g-2*g*dot(direction,ray)),1.5));
+            float phaseDenominator=max(.01,1+g*g-2*g*dot(direction,ray));
+            float phase=(1-g*g)/(4*Pi*phaseDenominator*sqrt(phaseDenominator));
             // Four samples of the same world density approximate light-path absorption.
             float opticalDepth=0;[unroll]for(uint j=0;j<4;j++)opticalDepth+=SampleDensity(p+delta*((j+.5)/4),s);
             float lightTransmission=exp(-opticalDepth*.25*distance*(s.distribution.w+s.optical.y))*PopulationTransmission(index,p);
