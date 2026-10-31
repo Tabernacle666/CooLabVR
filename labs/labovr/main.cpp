@@ -103,7 +103,14 @@ int RenderThread(Channels& io,const RunOptions& options) {
     double diagnosticSince=0,diagnosticStarted=QpcNowSeconds();
     bool diagnosticFailed=false;
     uint64_t diagnosticFrames=0,diagnosticTracked=0,diagnosticSubmitted=0;
-    double diagnosticCpuTotal=0,diagnosticCpuPeak=0;
+    double diagnosticCpuTotal=0,diagnosticCpuPeak=0,diagnosticPeriodMs=0;
+    uint64_t diagnosticOverBudget=0,diagnosticRenderRequested=0;
+    struct StageCpu {
+        double totalMs{};uint64_t calls{};
+        void Add(double elapsedMs){totalMs+=elapsedMs;++calls;}
+        double Average()const{return calls?totalMs/double(calls):0.0;}
+    };
+    StageCpu homeCpu,physicsCpu,prepareCpu,acquireCpu,submitCpu;
     if(options.diagnosticSeconds){
         const auto& fog=home.DiagnosticFog();
         LogEvent(0,"sweep.start","views=%u settle_s=3 max_s=%d night=dark_room theme=%u fog=%u density=%.4f flies=%u",
@@ -155,7 +162,9 @@ int RenderThread(Channels& io,const RunOptions& options) {
         std::span<const SceneLight> attractive;if(activePlugin&&activePlugin->Active())attractive=activePlugin->AttractiveLights();
         {
             auto scope=performance.Measure(CpuStage::HomeUpdate);
+            const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
             home.Update(frame.input,now,attractive);
+            if(options.diagnosticSeconds)homeCpu.Add((QpcNowSeconds()-begin)*1000.);
         }
         HomeCommand command=home.ConsumeCommand();
         if(command.kind==HomeCommandKind::NewSession){activeWorldId="home";activeWorldName="Home";menuVisible=true;activeWorldRetainsHomeAmbient=true;home.SetMenuVisible(true);pluginHost.SetInputCaptured(false);worlds.UnloadActive();activePlugin.reset();activeModule.reset();pluginHost.ClearWorldServices();clientInput.SetNavigationOptions(true,true);graphics.WaitIdle();worlds.ResetPersistent(home);home.SetAmbientVisible(true);presentation.Set(home.Contributions());SceneData scene=home.Scene();graphics.WaitIdle();graphics.ReplaceScene(scene,presentation.Contributions());audio.LoadScene(scene);}
@@ -183,7 +192,12 @@ int RenderThread(Channels& io,const RunOptions& options) {
             LogEvent(frame.input.frameId,"plugin.transition","stage=complete");
         }
         else if(command.kind==HomeCommandKind::Quit)io.stop=true;
-        {auto scope=performance.Measure(CpuStage::PhysicsAdvance);physics.Advance(now,frame.input.frameId);}
+        {
+            auto scope=performance.Measure(CpuStage::PhysicsAdvance);
+            const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
+            physics.Advance(now,frame.input.frameId);
+            if(options.diagnosticSeconds)physicsCpu.Add((QpcNowSeconds()-begin)*1000.);
+        }
         home.PublishMenu();
         {
             auto scope=performance.Measure(CpuStage::AudioAndEvents);
@@ -194,14 +208,18 @@ int RenderThread(Channels& io,const RunOptions& options) {
             bool prepared;
             {
                 auto scope=performance.Measure(CpuStage::GraphicsPrepare);
+                const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
                 prepared=graphics.Prepare(frame.input);
+                if(options.diagnosticSeconds)prepareCpu.Add((QpcNowSeconds()-begin)*1000.);
             }
             if(prepared){
                 bool acquired;
                 {
                     auto scope=performance.Measure(CpuStage::LateLocateAcquire);
+                    const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
                     xr.LocateLate(frame);
                     acquired=frame.tracked&&xr.AcquireSwapchains(frame);
+                    if(options.diagnosticSeconds)acquireCpu.Add((QpcNowSeconds()-begin)*1000.);
                 }
                 if(acquired){
                     if(options.diagnosticSeconds && diagnosticSlot<diagnosticViews.size()){
@@ -226,7 +244,9 @@ int RenderThread(Channels& io,const RunOptions& options) {
                         }
                     }
                     auto scope=performance.Measure(CpuStage::GraphicsRender);
+                    const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
                     graphics.Render(frame);
+                    if(options.diagnosticSeconds)submitCpu.Add((QpcNowSeconds()-begin)*1000.);
                 }
             }
         }
@@ -236,14 +256,22 @@ int RenderThread(Channels& io,const RunOptions& options) {
         }
         double activeCpuMs=(QpcNowSeconds()-activeFrameBegin)*1000;
         double displayBudgetMs=double(frame.displayPeriod)/1'000'000.0;
-        LogEvent(frame.input.frameId,"vr.frame","render_requested=%u tracked=%u submitted=%u abandoned=%u active_cpu_ms=%.4f display_budget_ms=%.4f cpu_over_budget=%u",unsigned(frame.render),unsigned(frame.tracked),unsigned(frame.submitted),unsigned(frame.render&&!frame.submitted),activeCpuMs,displayBudgetMs,unsigned(displayBudgetMs>0&&activeCpuMs>displayBudgetMs));
+        if(!options.diagnosticSeconds)
+            LogEvent(frame.input.frameId,"vr.frame","render_requested=%u tracked=%u submitted=%u abandoned=%u active_cpu_ms=%.4f display_budget_ms=%.4f cpu_over_budget=%u",unsigned(frame.render),unsigned(frame.tracked),unsigned(frame.submitted),unsigned(frame.render&&!frame.submitted),activeCpuMs,displayBudgetMs,unsigned(displayBudgetMs>0&&activeCpuMs>displayBudgetMs));
         if(options.diagnosticSeconds){
             ++diagnosticFrames;diagnosticTracked+=frame.tracked?1:0;diagnosticSubmitted+=frame.submitted?1:0;
+            diagnosticRenderRequested+=frame.render?1:0;
             diagnosticCpuTotal+=activeCpuMs;diagnosticCpuPeak=(std::max)(diagnosticCpuPeak,activeCpuMs);
+            diagnosticPeriodMs+=displayBudgetMs;
+            diagnosticOverBudget+=(displayBudgetMs>0&&activeCpuMs>displayBudgetMs)?1u:0u;
         }
         performance.EndFrame(frame,graphics,xr,io);
     }
-    io.stop=true;graphics.WaitIdle();graphics.PumpCaptures();graphics.DetachStream(homeStream);worlds.UnloadAll();activePlugin.reset();activeModule.reset();pluginHost.ClearWorldServices();homeHost.ClearWorldServices();physics.Shutdown();audio.Stop();graphics.WaitIdle();audio.UnloadScene();graphics.UnloadScene();jobs.Stop();
+    io.stop=true;
+    // Sample DXGI memory usage once, after the frame loop; never poll it per frame.
+    const auto diagVram=options.diagnosticSeconds?graphics.MemoryStats():GpuMemoryStats{};
+    const auto diagGpu=options.diagnosticSeconds?graphics.PerformanceInfo():GraphicsPerformanceInfo{};
+    graphics.WaitIdle();graphics.PumpCaptures();graphics.DetachStream(homeStream);worlds.UnloadAll();activePlugin.reset();activeModule.reset();pluginHost.ClearWorldServices();homeHost.ClearWorldServices();physics.Shutdown();audio.Stop();graphics.WaitIdle();audio.UnloadScene();graphics.UnloadScene();jobs.Stop();
     const auto validation=graphics.ValidationState();bool clean=!validation.deviceRemoved&&!validation.errors&&!validation.warnings;
     if(options.diagnosticSeconds){
         LogEvent(0,"sweep.summary","views_saved=%u expected=%u frames=%llu tracked=%llu submitted=%llu avg_cpu_ms=%.3f peak_cpu_ms=%.3f elapsed_s=%.2f gpu_errors=%u gpu_warnings=%u",
@@ -251,6 +279,15 @@ int RenderThread(Channels& io,const RunOptions& options) {
             static_cast<unsigned long long>(diagnosticTracked),static_cast<unsigned long long>(diagnosticSubmitted),
             diagnosticFrames?diagnosticCpuTotal/double(diagnosticFrames):0,diagnosticCpuPeak,
             QpcNowSeconds()-diagnosticStarted,unsigned(validation.errors),unsigned(validation.warnings));
+        LogEvent(0,"sweep.cpu","home_avg_ms=%.3f physics_avg_ms=%.3f prepare_avg_ms=%.3f acquire_avg_ms=%.3f submit_avg_ms=%.3f over_budget=%llu display_period_ms=%.3f requested=%llu",
+            homeCpu.Average(),physicsCpu.Average(),prepareCpu.Average(),acquireCpu.Average(),submitCpu.Average(),
+            static_cast<unsigned long long>(diagnosticOverBudget),
+            diagnosticFrames?diagnosticPeriodMs/double(diagnosticFrames):0.,
+            static_cast<unsigned long long>(diagnosticRenderRequested));
+        LogEvent(0,"sweep.gpu","adapter=%s width=%u height=%u views=%u vram_usage_mb=%.1f vram_budget_mb=%.1f vram_physical_mb=%.1f gpu_validation=%u",
+            diagGpu.adapter.c_str(),diagGpu.renderWidth,diagGpu.renderHeight,diagGpu.viewCount,
+            double(diagVram.usage)/1048576.,double(diagVram.budget)/1048576.,
+            double(diagGpu.dedicatedVramBytes)/1048576.,unsigned(options.gpuValidation));
         if(diagnosticFailed||diagnosticSlot!=diagnosticViews.size())return 3;
     }
     return options.gpuValidation&&!clean?2:0;
@@ -271,5 +308,6 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
             options.diagnosticCamerasFile=args[++i];
         else lab::Fail("Unknown or incomplete option");}LocalFree(args);}
     if(options.diagnosticSeconds&&options.diagnosticCamerasFile.empty())lab::Fail("Diagnostic sweep requires --diagnostic-camera-file");
+    lab::SetSessionLogCompact(options.diagnosticSeconds!=0);
     int result=0;auto io=std::make_unique<lab::Channels>();std::thread render([&]{result=lab::RenderThread(*io,options);});while(!io->stop.load(std::memory_order_relaxed)){MSG message;while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){if(message.message==WM_QUIT)io->stop=true;TranslateMessage(&message);DispatchMessageW(&message);}if(GetAsyncKeyState(VK_ESCAPE)&0x8000)io->stop=true;Sleep(5);}render.join();LogEvent(0,"session.end","clean_shutdown=1 result=%d",result);lab::StopSessionLog();return result;
 }

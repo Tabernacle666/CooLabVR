@@ -85,11 +85,17 @@ try {
     $env:CONSOLEVR_CAPTURE_DIR = $previousCaptureDir
     $captureEvents = @()
     $summary = $null
+    $cpuMetrics = $null
+    $gpuMetrics = $null
     if(Test-Path -LiteralPath $gameLog -PathType Leaf) {
         $lines = @(Get-Content -LiteralPath $gameLog -ErrorAction SilentlyContinue)
         $captureEvents = @($lines | Where-Object { $_ -match 'sweep\.capture\.saved' })
         $summary = @($lines | Where-Object { $_ -match 'sweep\.summary' } | Select-Object -Last 1)
-        $summary = if($summary.Count) { $summary[0] } else { $null }
+        $summary = if($summary.Count) { [string]$summary[0] } else { $null }
+        $cpuLines = @($lines | Where-Object { $_ -match '\tsweep\.cpu\t' } | Select-Object -Last 1)
+        $gpuLines = @($lines | Where-Object { $_ -match '\tsweep\.gpu\t' } | Select-Object -Last 1)
+        if($cpuLines.Count) { $cpuMetrics = [string]$cpuLines[0] }
+        if($gpuLines.Count) { $gpuMetrics = [string]$gpuLines[0] }
         $lines | Where-Object { $_ -match 'sweep\.(start|view|capture|summary|timeout)' } |
             Set-Content -LiteralPath (Join-Path $runDir 'capture_index.txt') -Encoding UTF8
     }
@@ -143,6 +149,8 @@ try {
         saved_events = $captureEvents.Count
         jpeg_files = @($jpgs | ForEach-Object { $_.Name })
         performance_summary = $summary
+        performance_cpu = $cpuMetrics
+        performance_gpu = $gpuMetrics
         errors = @($errors.ToArray())
         complete = $complete
     }

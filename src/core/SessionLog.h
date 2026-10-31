@@ -9,12 +9,14 @@ void StartSessionLog(const wchar_t* path);
 void StopSessionLog() noexcept;
 bool SessionLogEnabled() noexcept;
 void LogEvent(uint64_t frame,const char* stage,const char* format,...) noexcept;
+void SetSessionLogCompact(bool compact) noexcept;
 void LogFatal(const char* message) noexcept;
 #else
 inline void StartSessionLog(const wchar_t*) {}
 inline void StopSessionLog() noexcept {}
 inline bool SessionLogEnabled() noexcept {return false;}
 inline void LogFatal(const char*) noexcept {}
+inline void SetSessionLogCompact(bool) noexcept {}
 #define LogEvent(...) ((void)0)
 #endif
 }

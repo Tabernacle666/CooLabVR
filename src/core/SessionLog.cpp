@@ -9,7 +9,7 @@ struct Slot {std::atomic<uint64_t> sequence{};Record record;};
 alignas(64) std::array<Slot,Capacity> slots;
 std::atomic<uint64_t> enqueue{},dropped{},writeErrors{};
 uint64_t dequeue{};
-std::atomic<bool> enabled{},stopping{};
+std::atomic<bool> enabled{},stopping{},compactMode{};
 HANDLE file=INVALID_HANDLE_VALUE,worker{};
 void Write(const Record& record) noexcept {
     DWORD written=0;
@@ -42,8 +42,19 @@ DWORD WINAPI Run(void*) {
 }
 }
 bool SessionLogEnabled() noexcept{return enabled.load(std::memory_order_relaxed);}
+void SetSessionLogCompact(bool compact) noexcept{compactMode.store(compact,std::memory_order_relaxed);}
+bool KeepCompactStage(const char* stage) noexcept{
+    // No per-frame string formatting, queuing or disk writes in the sweep.
+    return !std::strncmp(stage,"sweep.",6)||!std::strncmp(stage,"capture.",8)||
+        !std::strncmp(stage,"startup.",8)||!std::strncmp(stage,"session.",8)||
+        !std::strncmp(stage,"plugin.transition",17)||!std::strncmp(stage,"home.lamp",9)||
+        !std::strncmp(stage,"gpu.managed_refused",19)||
+        std::strstr(stage,"error")||std::strstr(stage,"warning")||
+        std::strstr(stage,"fatal");
+}
 void LogEvent(uint64_t frame,const char* stage,const char* format,...) noexcept {
     if(!SessionLogEnabled())return;
+    if(compactMode.load(std::memory_order_relaxed)&&!KeepCompactStage(stage))return;
     char detail[768];va_list args;va_start(args,format);vsnprintf(detail,sizeof(detail),format,args);va_end(args);detail[sizeof(detail)-1]=0;
     // Bounded MPSC enqueue: producers never wait for disk or a free slot.
     uint64_t pos=enqueue.load(std::memory_order_relaxed);

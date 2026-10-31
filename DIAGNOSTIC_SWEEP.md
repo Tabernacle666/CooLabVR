@@ -51,3 +51,18 @@ Le diagnostic ne change que les matrices de vue/projection utilisées par le ren
 Un casque en veille, un runtime qui refuse le rendu, une défaillance GPU ou une compilation incomplète peuvent empêcher les captures. Dans ce cas, la commande retourne un code d'échec et conserve les preuves disponibles.
 
 **État de validation :** changements publiés au niveau source seulement. La compilation Windows/MSVC, le rendu OpenXR et le cadrage exact par rapport aux deux images de référence doivent être confirmés sur le PC du créateur; les angles CSV pourront ensuite être ajustés sans recompilation.
+
+
+## Profiling leger pour optimisation future
+
+Le balayage utilise un log compact (pas de journalisation des frames une par une).
+A la fin, `sweep.summary` donne les frames demandees/suivies/soumises, le temps CPU
+actif moyen et maximal et les erreurs GPU. `sweep.cpu` donne uniquement les
+moyennes CPU des etapes Home, PhysX, preparation graphique, acquisition XR et
+soumission graphique, ainsi que les frames dont le CPU depasse le budget
+d'affichage et la periode XR moyenne. `sweep.gpu` releve une seule fois
+l'adaptateur, la resolution de rendu et la VRAM utilisee/disponible.
+
+**Important :** `submit_avg_ms` mesure le temps CPU dans la fonction de
+rendu et non le temps d'execution GPU. Aucun query GPU par frame n'est ajoute.
+L'option `-GpuValidation` reste facultative et peut influencer les performances.
