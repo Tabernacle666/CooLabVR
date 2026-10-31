@@ -97,7 +97,27 @@ bool XR::BeginFrame(XRFrame& f){f={};if(!running_)return false;XrFrameWaitInfo w
     XrResult synced=xrSyncActions(session_,&sync);
     if(performanceCaptureActive){QueryPerformanceCounter(&sync1);f.performanceTiming.syncActionsMs=double(sync1.QuadPart-sync0.QuadPart)*1000.0/double(performanceQpcFrequency);}
     if(XR_FAILED(synced)&&synced!=XR_SESSION_NOT_FOCUSED)Xr(synced,"xrSyncActions");LocateInput(f);LogEvent(f.input.frameId,"xr.begin","predicted_xr=%lld qpc=%lld roundtrip_xr=%lld period_ns=%lld should_render=%u focused=%u actions=%u",static_cast<long long>(f.displayTime),static_cast<long long>(targetQpc.QuadPart),static_cast<long long>(roundTrip),static_cast<long long>(f.displayPeriod),unsigned(f.render),unsigned(f.input.focused),f.input.actionCount);return true;}
-bool XR::AcquireSwapchains(XRFrame& f){if(!f.begun||!f.render||f.ready)return f.ready;XrSwapchainImageAcquireInfo ainfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wi.timeout=XR_INFINITE_DURATION;Xr(xrAcquireSwapchainImage(color_,&ainfo,&f.color),"acquire color");Xr(xrWaitSwapchainImage(color_,&wi),"wait color");Xr(xrAcquireSwapchainImage(depth_,&ainfo,&f.depth),"acquire depth");Xr(xrWaitSwapchainImage(depth_,&wi),"wait depth");f.ready=true;LogEvent(f.input.frameId,"xr.acquired","color=%u depth=%u array_layers=%u",f.color,f.depth,viewCount_);return true;}
+bool XR::AcquireSwapchains(XRFrame& f){
+    if(!f.begun||!f.render||f.ready)return f.ready;
+    XrSwapchainImageAcquireInfo ainfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wi.timeout=XR_INFINITE_DURATION;
+    auto timed=[&](auto&& call,double& milliseconds){
+        LARGE_INTEGER begin{},end{};
+        if(performanceCaptureActive)QueryPerformanceCounter(&begin);
+        call();
+        if(performanceCaptureActive){
+            QueryPerformanceCounter(&end);
+            milliseconds=double(end.QuadPart-begin.QuadPart)*1000.0/double(performanceQpcFrequency);
+        }
+    };
+    timed([&]{Xr(xrAcquireSwapchainImage(color_,&ainfo,&f.color),"acquire color");},f.performanceTiming.acquireColorMs);
+    timed([&]{Xr(xrWaitSwapchainImage(color_,&wi),"wait color");},f.performanceTiming.waitColorMs);
+    timed([&]{Xr(xrAcquireSwapchainImage(depth_,&ainfo,&f.depth),"acquire depth");},f.performanceTiming.acquireDepthMs);
+    timed([&]{Xr(xrWaitSwapchainImage(depth_,&wi),"wait depth");},f.performanceTiming.waitDepthMs);
+    f.ready=true;
+    LogEvent(f.input.frameId,"xr.acquired","color=%u depth=%u array_layers=%u",f.color,f.depth,viewCount_);
+    return true;
+}
 void XR::LocateLate(XRFrame& f){XrViewLocateInfo l{XR_TYPE_VIEW_LOCATE_INFO};l.viewConfigurationType=viewConfigurationType_;l.displayTime=f.displayTime;l.space=space_;XrViewState s{XR_TYPE_VIEW_STATE};uint32_t n=0;for(auto& v:views_)v={XR_TYPE_VIEW};LARGE_INTEGER locate0{},locate1{};if(performanceCaptureActive)QueryPerformanceCounter(&locate0);
     XrResult located=xrLocateViews(session_,&l,&s,viewCount_,&n,views_.data());
     if(performanceCaptureActive){QueryPerformanceCounter(&locate1);f.performanceTiming.locateViewsMs=double(locate1.QuadPart-locate0.QuadPart)*1000.0/double(performanceQpcFrequency);f.performanceTiming.valid=true;}

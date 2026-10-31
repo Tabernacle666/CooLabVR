@@ -14,6 +14,7 @@ inline constexpr uint32_t MaxViews=ConsoleSpec::MaxViews;
 inline constexpr uint32_t HandCount=InputSourceCount;
 struct XRPerformanceTiming {
     double waitFrameMs{},beginFrameMs{},syncActionsMs{},locateViewsMs{};
+    double acquireColorMs{},waitColorMs{},acquireDepthMs{},waitDepthMs{};
     bool valid{};
 };
 struct XRFrame {XRPerformanceTiming performanceTiming{};bool begun{},render{},ready{},tracked{},submitted{},performanceGestureDown{};uint32_t color{},depth{},viewCount{};XrTime displayTime{};XrDuration displayPeriod{13888889};std::array<XMFLOAT4X4,MaxViews> vp{},inverseVP{};std::array<XMFLOAT3,MaxViews> eyes{};FrameInput input;};

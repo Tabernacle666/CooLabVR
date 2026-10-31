@@ -88,6 +88,10 @@ try {
     $cpuMetrics = $null
     $gpuMetrics = $null
     $physicsProfile = @()
+    $xrProfile = $null
+    $gpuTiming = $null
+    $gpuPasses = @()
+    $gpuQueues = @()
     if(Test-Path -LiteralPath $gameLog -PathType Leaf) {
         $lines = @(Get-Content -LiteralPath $gameLog -ErrorAction SilentlyContinue)
         $captureEvents = @($lines | Where-Object { $_ -match 'sweep\.capture\.saved' })
@@ -100,6 +104,14 @@ try {
         # Get-Content attaches PSPath/PSDrive notes to each string. Force bare strings,
         # otherwise ConvertTo-Json recursively serializes the entire provider graph.
         $physicsProfile = @($lines | Where-Object { $_ -match '\tphysics\.profile\.' } |
+            ForEach-Object { [string]::Copy($_.ToString()) })
+        $xrRows = @($lines | Where-Object { $_ -match '\tsweep\.xr\t' } | Select-Object -Last 1)
+        $gpuTimingRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_timing\t' } | Select-Object -Last 1)
+        if($xrRows.Count) { $xrProfile = [string]$xrRows[0] }
+        if($gpuTimingRows.Count) { $gpuTiming = [string]$gpuTimingRows[0] }
+        $gpuPasses = @($lines | Where-Object { $_ -match '\tsweep\.gpu_pass\t' } |
+            ForEach-Object { [string]::Copy($_.ToString()) })
+        $gpuQueues = @($lines | Where-Object { $_ -match '\tsweep\.gpu_queue\t' } |
             ForEach-Object { [string]::Copy($_.ToString()) })
         $lines | Where-Object { $_ -match 'sweep\.(start|view|capture|summary|timeout)' } |
             Set-Content -LiteralPath (Join-Path $runDir 'capture_index.txt') -Encoding UTF8
@@ -134,6 +146,10 @@ try {
             Note ('ERROR JPEG: ' + $_.Exception.Message)
         }
     }
+    if($gameExit -eq 0 -and (-not $xrProfile -or -not $gpuTiming -or $gpuPasses.Count -eq 0)) {
+        $errors.Add('GPU/OpenXR performance profile incomplete')
+        Note 'ERROR: missing GPU/OpenXR performance profile'
+    }
     if($gameExit -eq 0 -and $physicsProfile.Count -ne 3) {
         $errors.Add("Physics telemetry incomplete: received $($physicsProfile.Count)/3 profile records")
         Note "ERROR: expected three physics.profile records; received $($physicsProfile.Count)"
@@ -161,6 +177,10 @@ try {
         performance_cpu = $cpuMetrics
         performance_gpu = $gpuMetrics
         performance_physics = @($physicsProfile)
+        performance_xr = $xrProfile
+        performance_gpu_timing = $gpuTiming
+        performance_gpu_passes = @($gpuPasses)
+        performance_gpu_queues = @($gpuQueues)
         errors = @($errors.ToArray())
         complete = $complete
     }

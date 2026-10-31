@@ -24,6 +24,9 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <map>
+#include <algorithm>
+#include <cmath>
 namespace lab {
 const CoreIdentity& LaboVRIdentity() noexcept {
     static const CoreIdentity identity{
@@ -111,6 +114,13 @@ int RenderThread(Channels& io,const RunOptions& options) {
         double Average()const{return calls?totalMs/double(calls):0.0;}
     };
     StageCpu homeCpu,physicsCpu,prepareCpu,acquireCpu,submitCpu;
+    // The GPU timestamp burst begins after BOTH baseline images have been saved.
+    // It does not perturb ordinary CPU timing or the reference screenshots.
+    constexpr uint64_t DiagnosticGpuBurstFrames=90;
+    bool diagnosticGpuActive=false,diagnosticGpuFinished=false;
+    uint64_t diagnosticGpuFrames=0;
+    StageCpu xrWaitCpu,xrBeginCpu,xrSyncCpu,xrLocateCpu,xrAcquireColorCpu,
+        xrWaitColorCpu,xrAcquireDepthCpu,xrWaitDepthCpu,xrEndCpu;
     if(options.diagnosticSeconds){
         const auto& fog=home.DiagnosticFog();
         LogEvent(0,"sweep.start","views=%u settle_s=3 max_s=%d night=dark_room theme=%u fog=%u density=%.4f flies=%u",
@@ -132,7 +142,14 @@ int RenderThread(Channels& io,const RunOptions& options) {
                         LogEvent(status.frameId,"sweep.capture.saved","slot=%u name=%s file=%s",
                             uint32_t(diagnosticSlot),view.name.c_str(),status.fileUtf8);
                         ++diagnosticSlot;diagnosticRequest=0;diagnosticSince=0;
-                        if(diagnosticSlot==diagnosticViews.size())io.stop=true;
+                        if(diagnosticSlot==diagnosticViews.size()){
+                            graphics.PreparePerformanceCapture();
+                            graphics.BeginPerformanceCapture();
+                            xr.SetPerformanceCaptureActive(true);
+                            diagnosticGpuActive=true;
+                            LogEvent(0,"sweep.gpu_profile_start","frames=%llu",
+                                static_cast<unsigned long long>(DiagnosticGpuBurstFrames));
+                        }
                     }else if(status.state==LAB_CAPTURE_FAILED_V1){
                         LogEvent(status.frameId,"sweep.capture.failed","slot=%u message=%s",
                             uint32_t(diagnosticSlot),status.message);
@@ -149,6 +166,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
         }
         xr.PollEvents();if(!xr.Running()){Sleep(5);continue;}
         XRFrame frame;if(!xr.BeginFrame(frame))continue;
+        if(diagnosticGpuActive){xrWaitCpu.Add(frame.performanceTiming.waitFrameMs);xrBeginCpu.Add(frame.performanceTiming.beginFrameMs);xrSyncCpu.Add(frame.performanceTiming.syncActionsMs);}
         const double activeFrameBegin=QpcNowSeconds();
         if(activeFrameBegin>=inputConfigurationCheckAt){
             inputConfigurationCheckAt=activeFrameBegin+1.;auto modified=std::filesystem::last_write_time(inputConfiguration,inputConfigurationError);
@@ -164,7 +182,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
             auto scope=performance.Measure(CpuStage::HomeUpdate);
             const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
             home.Update(frame.input,now,attractive);
-            if(options.diagnosticSeconds)homeCpu.Add((QpcNowSeconds()-begin)*1000.);
+            if(options.diagnosticSeconds&&!diagnosticGpuActive)homeCpu.Add((QpcNowSeconds()-begin)*1000.);
         }
         HomeCommand command=home.ConsumeCommand();
         if(command.kind==HomeCommandKind::NewSession){activeWorldId="home";activeWorldName="Home";menuVisible=true;activeWorldRetainsHomeAmbient=true;home.SetMenuVisible(true);pluginHost.SetInputCaptured(false);worlds.UnloadActive();activePlugin.reset();activeModule.reset();pluginHost.ClearWorldServices();clientInput.SetNavigationOptions(true,true);graphics.WaitIdle();worlds.ResetPersistent(home);home.SetAmbientVisible(true);presentation.Set(home.Contributions());SceneData scene=home.Scene();graphics.WaitIdle();graphics.ReplaceScene(scene,presentation.Contributions());audio.LoadScene(scene);}
@@ -196,7 +214,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
             auto scope=performance.Measure(CpuStage::PhysicsAdvance);
             const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
             physics.Advance(now,frame.input.frameId);
-            if(options.diagnosticSeconds)physicsCpu.Add((QpcNowSeconds()-begin)*1000.);
+            if(options.diagnosticSeconds&&!diagnosticGpuActive)physicsCpu.Add((QpcNowSeconds()-begin)*1000.);
         }
         home.PublishMenu();
         {
@@ -210,7 +228,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 auto scope=performance.Measure(CpuStage::GraphicsPrepare);
                 const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
                 prepared=graphics.Prepare(frame.input);
-                if(options.diagnosticSeconds)prepareCpu.Add((QpcNowSeconds()-begin)*1000.);
+                if(options.diagnosticSeconds&&!diagnosticGpuActive)prepareCpu.Add((QpcNowSeconds()-begin)*1000.);
             }
             if(prepared){
                 bool acquired;
@@ -219,7 +237,14 @@ int RenderThread(Channels& io,const RunOptions& options) {
                     const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
                     xr.LocateLate(frame);
                     acquired=frame.tracked&&xr.AcquireSwapchains(frame);
-                    if(options.diagnosticSeconds)acquireCpu.Add((QpcNowSeconds()-begin)*1000.);
+                    if(options.diagnosticSeconds&&!diagnosticGpuActive)acquireCpu.Add((QpcNowSeconds()-begin)*1000.);
+                    if(diagnosticGpuActive){
+                        xrLocateCpu.Add(frame.performanceTiming.locateViewsMs);
+                        xrAcquireColorCpu.Add(frame.performanceTiming.acquireColorMs);
+                        xrWaitColorCpu.Add(frame.performanceTiming.waitColorMs);
+                        xrAcquireDepthCpu.Add(frame.performanceTiming.acquireDepthMs);
+                        xrWaitDepthCpu.Add(frame.performanceTiming.waitDepthMs);
+                    }
                 }
                 if(acquired){
                     if(options.diagnosticSeconds && diagnosticSlot<diagnosticViews.size()){
@@ -242,23 +267,29 @@ int RenderThread(Channels& io,const RunOptions& options) {
                                     uint32_t(diagnosticSlot),view.name.c_str(),static_cast<unsigned long long>(ticket));
                             }
                         }
+                    }else if(options.diagnosticSeconds&&diagnosticGpuActive&&!diagnosticViews.empty()){
+                        // Hold a fixed three-quarter viewpoint during the GPU burst.
+                        const auto& view=diagnosticViews.back();
+                        xr.SetDiagnosticCamera(frame,view.position,view.target);
                     }
                     auto scope=performance.Measure(CpuStage::GraphicsRender);
                     const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
                     graphics.Render(frame);
-                    if(options.diagnosticSeconds)submitCpu.Add((QpcNowSeconds()-begin)*1000.);
+                    if(options.diagnosticSeconds&&!diagnosticGpuActive)submitCpu.Add((QpcNowSeconds()-begin)*1000.);
                 }
             }
         }
         {
             auto scope=performance.Measure(CpuStage::XrEndFrame);
+            const double xrEndStart=diagnosticGpuActive?QpcNowSeconds():0.;
             xr.EndFrame(frame);
+            if(diagnosticGpuActive)xrEndCpu.Add((QpcNowSeconds()-xrEndStart)*1000.);
         }
         double activeCpuMs=(QpcNowSeconds()-activeFrameBegin)*1000;
         double displayBudgetMs=double(frame.displayPeriod)/1'000'000.0;
         if(!options.diagnosticSeconds)
             LogEvent(frame.input.frameId,"vr.frame","render_requested=%u tracked=%u submitted=%u abandoned=%u active_cpu_ms=%.4f display_budget_ms=%.4f cpu_over_budget=%u",unsigned(frame.render),unsigned(frame.tracked),unsigned(frame.submitted),unsigned(frame.render&&!frame.submitted),activeCpuMs,displayBudgetMs,unsigned(displayBudgetMs>0&&activeCpuMs>displayBudgetMs));
-        if(options.diagnosticSeconds){
+        if(options.diagnosticSeconds&&!diagnosticGpuActive){
             ++diagnosticFrames;diagnosticTracked+=frame.tracked?1:0;diagnosticSubmitted+=frame.submitted?1:0;
             diagnosticRenderRequested+=frame.render?1:0;
             diagnosticCpuTotal+=activeCpuMs;diagnosticCpuPeak=(std::max)(diagnosticCpuPeak,activeCpuMs);
@@ -266,8 +297,28 @@ int RenderThread(Channels& io,const RunOptions& options) {
             diagnosticOverBudget+=(displayBudgetMs>0&&activeCpuMs>displayBudgetMs)?1u:0u;
         }
         performance.EndFrame(frame,graphics,xr,io);
+        if(diagnosticGpuActive&&++diagnosticGpuFrames>=DiagnosticGpuBurstFrames){
+            graphics.EndPerformanceCapture();
+            xr.SetPerformanceCaptureActive(false);
+            diagnosticGpuActive=false;
+            diagnosticGpuFinished=true;
+            LogEvent(0,"sweep.gpu_profile_end","frames=%llu",
+                static_cast<unsigned long long>(diagnosticGpuFrames));
+            io.stop=true;
+        }
     }
     io.stop=true;
+    if(diagnosticGpuActive){
+        graphics.EndPerformanceCapture();
+        xr.SetPerformanceCaptureActive(false);
+        diagnosticGpuActive=false;
+    }
+    std::vector<GpuPerformancePassSample> diagnosticGpuPasses;
+    std::vector<GpuQueueFrameAnalysis> diagnosticGpuQueues;
+    std::vector<GpuGapSample> diagnosticGpuGaps;
+    if(diagnosticGpuFrames){
+        graphics.CollectPerformanceCapture(diagnosticGpuPasses,diagnosticGpuQueues,diagnosticGpuGaps);
+    }
     // Sample DXGI memory usage once, after the frame loop; never poll it per frame.
     const auto diagVram=options.diagnosticSeconds?graphics.MemoryStats():GpuMemoryStats{};
     const auto diagGpu=options.diagnosticSeconds?graphics.PerformanceInfo():GraphicsPerformanceInfo{};
@@ -288,6 +339,62 @@ int RenderThread(Channels& io,const RunOptions& options) {
             diagGpu.adapter.c_str(),diagGpu.renderWidth,diagGpu.renderHeight,diagGpu.viewCount,
             double(diagVram.usage)/1048576.,double(diagVram.budget)/1048576.,
             double(diagGpu.dedicatedVramBytes)/1048576.,unsigned(options.gpuValidation));
+        if(diagnosticGpuFinished){
+            // GPU timestamps are calibrated across Copy/Compute/Direct queues.
+            // Frame span is not the sum of overlapping queue durations.
+            std::map<uint64_t,std::pair<double,double>> spans;
+            std::map<std::string,std::pair<double,uint64_t>> passTotals;
+            for(const auto& pass:diagnosticGpuPasses){
+                if(pass.endQpc<=pass.startQpc)continue;
+                auto [it,inserted]=spans.try_emplace(pass.frameId,pass.startQpc,pass.endQpc);
+                if(!inserted){
+                    it->second.first=std::min(it->second.first,pass.startQpc);
+                    it->second.second=std::max(it->second.second,pass.endQpc);
+                }
+                auto& total=passTotals[pass.name];total.first+=pass.milliseconds;++total.second;
+            }
+            std::vector<double> frameMs;
+            for(const auto& [frameId,extent]:spans){
+                (void)frameId;
+                frameMs.push_back((extent.second-extent.first)*1000.0);
+            }
+            std::sort(frameMs.begin(),frameMs.end());
+            double sum=0.;for(double v:frameMs)sum+=v;
+            const double mean=frameMs.empty()?0.:sum/double(frameMs.size());
+            const double p95=frameMs.empty()?0.:frameMs[size_t(std::ceil(frameMs.size()*.95))-1];
+            const double peak=frameMs.empty()?0.:frameMs.back();
+            LogEvent(0,"sweep.gpu_timing",
+                "sampled_frames=%u passes=%u dropped_passes=%llu avg_span_ms=%.3f p95_span_ms=%.3f peak_span_ms=%.3f",
+                uint32_t(spans.size()),uint32_t(diagnosticGpuPasses.size()),
+                static_cast<unsigned long long>(graphics.PerformanceInfo().droppedGpuPasses),
+                mean,p95,peak);
+            std::vector<std::pair<std::string,std::pair<double,uint64_t>>> ranked(passTotals.begin(),passTotals.end());
+            std::sort(ranked.begin(),ranked.end(),[](const auto& a,const auto& b){
+                return a.second.first>b.second.first;
+            });
+            for(size_t i=0;i<std::min<size_t>(8,ranked.size());++i){
+                const auto& [name,totals]=ranked[i];
+                LogEvent(0,"sweep.gpu_pass","rank=%u name=%s calls=%llu avg_call_ms=%.3f",
+                    uint32_t(i+1),name.c_str(),static_cast<unsigned long long>(totals.second),
+                    totals.second?totals.first/double(totals.second):0.);
+            }
+            const char* queueNames[]{"copy","compute","direct"};
+            for(uint32_t queue=0;queue<3;++queue){
+                double total=0.,work=0.;uint64_t count=0;
+                for(const auto& sample:diagnosticGpuQueues)if(uint32_t(sample.queue)==queue){
+                    total+=sample.spanMs;work+=sample.workMs;++count;
+                }
+                LogEvent(0,"sweep.gpu_queue","queue=%s frames=%llu avg_span_ms=%.3f avg_work_ms=%.3f",
+                    queueNames[queue],static_cast<unsigned long long>(count),
+                    count?total/double(count):0.,count?work/double(count):0.);
+            }
+            LogEvent(0,"sweep.xr",
+                "frames=%llu wait_frame_ms=%.3f begin_frame_ms=%.3f sync_actions_ms=%.3f locate_ms=%.3f acquire_color_ms=%.3f wait_color_ms=%.3f acquire_depth_ms=%.3f wait_depth_ms=%.3f end_frame_ms=%.3f",
+                static_cast<unsigned long long>(diagnosticGpuFrames),
+                xrWaitCpu.Average(),xrBeginCpu.Average(),xrSyncCpu.Average(),xrLocateCpu.Average(),
+                xrAcquireColorCpu.Average(),xrWaitColorCpu.Average(),xrAcquireDepthCpu.Average(),
+                xrWaitDepthCpu.Average(),xrEndCpu.Average());
+        }
         if(diagnosticFailed||diagnosticSlot!=diagnosticViews.size())return 3;
     }
     return options.gpuValidation&&!clean?2:0;

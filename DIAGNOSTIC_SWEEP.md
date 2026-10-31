@@ -99,3 +99,25 @@ résultats PhysX : cela borne son nombre d'occurrences par frame.
 Le passage à 120 Hz peut changer légèrement la stabilité et les mouvements
 des joints/chaînes. Comparer les captures et vérifier le comportement de la
 lampe, du ventilateur et des mouches au prochain diagnostic.
+
+
+## Burst de profilage GPU/OpenXR automatique
+
+Après les deux photos de référence, le diagnostic exécute 90 frames supplémentaires
+avec les **timestamps D3D12 déjà implémentés**. Leurs résultats sont collectés
+après l'arrêt des commandes GPU; aucune lecture de timestamp pendant la frame.
+
+- `sweep.gpu_timing`: temps GPU du premier au dernier pass, moyennes, p95 et pic.
+  Les files Copy/Compute/Direct peuvent se chevaucher; ne pas sommer leurs durées.
+- `sweep.gpu_pass`: huit passes classées selon le coût GPU cumulé pendant le burst.
+- `sweep.gpu_queue`: moyenne du temps actif et de l'étendue des passes pour chaque file.
+- `sweep.xr`: durées de `xrWaitFrame`, `xrBeginFrame`, synchronisation des
+  actions, localisation, acquisition/attente couleur et profondeur, `xrEndFrame`.
+  **xrWaitFrame représente la cadence imposée par le runtime** et n'est pas du
+  travail GPU. Les attentes swapchain peuvent, elles, exposer une contention.
+
+Le profilage est séparé du relevé CPU habituel pour ne pas fausser les
+comparaisons. Le manifeste contient les champs `performance_xr`,
+`performance_gpu_timing`, `performance_gpu_passes` et
+`performance_gpu_queues`. Cet outil ne mesure pas encore le débit hors
+OpenXR; celui-ci requiert un banc de rendu à cible hors écran distinct.
