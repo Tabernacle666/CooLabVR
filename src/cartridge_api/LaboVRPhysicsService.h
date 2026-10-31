@@ -152,6 +152,8 @@ typedef struct LabPhysicsServiceV1 {
        layout changes, fetch/register the provider again before rendering. */
     LabU32 (LABOVR_PLUGIN_CALL *SetVisuals)(void*,LabPhysicsSceneV1,const LabPhysicsVisualV1*,LabU32,const LabPhysicsLightV1*,LabU32);
     LabU32 (LABOVR_PLUGIN_CALL *GetVisualProvider)(void*,LabPhysicsSceneV1,LabGpuPublicationProviderV1*);
+    /* Controls visual publication and local observer interaction. It does not
+       pause the population; SetPopulationInput.enabled controls simulation. */
     LabU32 (LABOVR_PLUGIN_CALL *SetVisible)(void*,LabPhysicsSceneV1,LabU32);
     LabU32 (LABOVR_PLUGIN_CALL *SetLightPower)(void*,LabPhysicsSceneV1,LabU32,float);
     LabU32 (LABOVR_PLUGIN_CALL *SetProbes)(void*,LabPhysicsSceneV1,const LabPhysicsBodyV1*,LabU32);

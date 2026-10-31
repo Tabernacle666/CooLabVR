@@ -86,13 +86,13 @@ __global__ void Init(PopulationStateGpu* states,uint32_t first,uint32_t count,La
     for(uint32_t pass=0;pass<4;pass++)for(uint32_t k=0;k<nb;k++)if(bodies[k].enabled){PxVec3 normal;float gap=Distance(bodies[k],BodyPose(bodies[k],poses),s.position,normal)-d.flight.bodyRadius;if(gap<0)s.position+=normal*(-gap+.0001f);}
     s.previous=s.position;s.heading=Safe(PxVec3(Unit(h+3)-.5f,(Unit(h+4)-.5f)*.4f,Unit(h+5)-.5f));s.velocity=s.heading*d.flight.nominalSpeed;s.activity=.6f;s.liftAxis=PxVec3(0,1,0);s.wingPhase=Unit(h+6)*6.2831853f;s.birth=h;states[first+i]=s;
 }
-__global__ void Step(PopulationStateGpu* states,uint32_t count,LabPopulationDescV1 d,LabPopulationInputV1 input,LabPopulationEffectsV1 effects,LabPopulationHandsV1 hands,const PopulationBodyGpu* bodies,const PopulationBodyPoseGpu* world,const uint32_t* grid,uint32_t nb,const PxTransform* previous,const PxTransform* poses,const PxVec3* velocities,const PxVec3* angular,PxVec3* forces,PxVec3* torques,const PhysicsLightGpu* lights,uint32_t nl,const PhysicsAirflowGpu* airflows,uint32_t airflowCount,LabPopulationSpaceV1 space,float dt,float reactionDt,PopulationClock clock){
+__global__ void Step(PopulationStateGpu* states,uint32_t count,LabPopulationDescV1 d,LabPopulationInputV1 input,LabPopulationEffectsV1 effects,LabPopulationHandsV1 hands,const PopulationBodyGpu* bodies,const PopulationBodyPoseGpu* world,const uint32_t* grid,uint32_t nb,const PxTransform* previous,const PxTransform* poses,const PxVec3* velocities,const PxVec3* angular,PxVec3* forces,PxVec3* torques,const PhysicsLightGpu* lights,uint32_t nl,const PhysicsAirflowGpu* airflows,uint32_t airflowCount,LabPopulationSpaceV1 space,float dt,float reactionDt,PopulationClock clock,bool observerPresent){
     uint32_t i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count||!input.enabled)return;
     auto s=states[i];const auto& f=d.flight;PxVec3 old=s.position;PxVec3 noise=Fourier(s.birth,clock);
     // Local swept capsules share the tracking input for both hands. Acceleration
     // is integrated at fixed dt, so repeated substeps do not multiply an impulse.
     PxVec3 sweepAcceleration(0);
-    for(uint32_t h=0;h<2;h++)if(hands.hand[h].tracked){
+    for(uint32_t h=0;h<2;h++)if(observerPresent&&hands.hand[h].tracked){
         auto hand=hands.hand[h];PxVec3 end=V(hand.position),start=V(hand.previous),v=V(hand.velocity);
         float speed=v.magnitude();if(speed<.2f)continue;
         PxVec3 segment=end-start;float len=segment.magnitudeSquared();
@@ -134,10 +134,12 @@ __global__ void Step(PopulationStateGpu* states,uint32_t count,LabPopulationDesc
     }}
     // Player capsule extends from the tracked head toward the floor. It has the
     // same post-impact multiplier as the hands but does not invent hand impacts.
-    PxVec3 head=V(input.playerPosition),axis=s.position-head;axis.y=s.position.y-fminf(head.y,fmaxf(.25f,s.position.y));
-    float playerDistance=axis.magnitude()-.24f;float playerRange=fmaxf(f.anticipationDistance*(s.impact>clock.realSeconds?f.impactMultiplier:1.f),effects.avoidanceRadius*aversion);
-    if(playerDistance<playerRange)steer+=Safe(axis,PxVec3(1,0,0))*fminf(6.f,(playerRange-playerDistance)/fmaxf(.05f,playerRange-f.comfortDistance))*fmaxf(authority,aversion)*(1+aversion*2);
-    for(uint32_t h=0;h<2;h++)if(hands.hand[h].tracked&&aversion>0){
+    PxVec3 head=V(input.playerPosition);
+    if(observerPresent){PxVec3 axis=s.position-head;axis.y=s.position.y-fminf(head.y,fmaxf(.25f,s.position.y));
+        float playerDistance=axis.magnitude()-.24f;float playerRange=fmaxf(f.anticipationDistance*(s.impact>clock.realSeconds?f.impactMultiplier:1.f),effects.avoidanceRadius*aversion);
+        if(playerDistance<playerRange)steer+=Safe(axis,PxVec3(1,0,0))*fminf(6.f,(playerRange-playerDistance)/fmaxf(.05f,playerRange-f.comfortDistance))*fmaxf(authority,aversion)*(1+aversion*2);
+    }
+    for(uint32_t h=0;h<2;h++)if(observerPresent&&hands.hand[h].tracked&&aversion>0){
         PxVec3 away=s.position-V(hands.hand[h].position);float distance=away.magnitude();
         float radius=effects.avoidanceRadius*aversion;
         if(distance<radius)steer+=Safe(away)*(1-distance/fmaxf(radius,.01f))*aversion*5;
@@ -180,8 +182,9 @@ __global__ void Step(PopulationStateGpu* states,uint32_t count,LabPopulationDesc
         if(b.index!=PhysicsInvalidIndex&&!b.kinematic&&impulse.magnitudeSquared()>0){Add(forces,b.index,-impulse/reactionDt);Add(torques,b.index,(hit-p.p).cross(-impulse/reactionDt));}
     }}
     // Solid player contact, independent of imperfect navigation.
-    PxVec3 closest=head;closest.y=fminf(head.y,fmaxf(.25f,to.y));PxVec3 delta=to-closest;float pr=.24f+f.bodyRadius;
-    if(delta.magnitudeSquared()<pr*pr){contactResolved=true;PxVec3 n=Safe(delta,PxVec3(1,0,0));to=closest+n*pr;float v=s.velocity.dot(n);if(v<0)s.velocity-=n*(1.2f*v);}
+    if(observerPresent){PxVec3 closest=head;closest.y=fminf(head.y,fmaxf(.25f,to.y));PxVec3 delta=to-closest;float pr=.24f+f.bodyRadius;
+        if(delta.magnitudeSquared()<pr*pr){contactResolved=true;PxVec3 n=Safe(delta,PxVec3(1,0,0));to=closest+n*pr;float v=s.velocity.dot(n);if(v<0)s.velocity-=n*(1.2f*v);}
+    }
     if(contactResolved)for(uint32_t word=0;word<4;word++){uint32_t mask=candidates[word];while(mask){uint32_t k=word*32+__ffs(mask)-1;mask&=mask-1;if(k>=nb)continue;auto b=bodies[k];
         if(!b.enabled||b.index!=PhysicsInvalidIndex||b.shape!=LAB_PHYSICS_BOX)continue;
         auto pose=world[k].current;PxVec3 before=pose.transformInv(old),after=pose.transformInv(to);
@@ -293,7 +296,7 @@ __global__ void Finish(const PopulationStateGpu* states,uint32_t count,uint32_t 
 }
 }
 void PopulationInitialize(cudaStream_t s,PopulationStateGpu* p,uint32_t first,uint32_t n,const LabPopulationDescV1& d,uint32_t birth,const PopulationBodyGpu* bodies,uint32_t nb,const PxTransform* poses){if(n)Init<<<(n+255)/256,256,0,s>>>(p,first,n,d,birth,bodies,nb,poses);}
-void PopulationStep(cudaStream_t s,PopulationStateGpu* p,uint32_t n,const LabPopulationDescV1& d,const LabPopulationInputV1& in,const LabPopulationEffectsV1& effects,const LabPopulationHandsV1& hands,const PopulationBodyGpu* bodies,PopulationBodyPoseGpu* world,uint32_t* grid,uint32_t nb,const PxTransform* previous,const PxTransform* poses,const PxVec3* v,const PxVec3* a,PxVec3* forces,PxVec3* torques,const PhysicsLightGpu* lights,uint32_t nl,const PhysicsAirflowGpu* airflows,uint32_t airflowCount,const LabPopulationSpaceV1& space,float dt,float reactionDt,double time,float realSeconds){if(n){if(nb)PrepareBodies<<<(nb+63)/64,64,0,s>>>(bodies,world,grid,nb,poses);PopulationClock clock{{float(fmod(time*.713,6.283185307)),float(fmod(time*1.117,6.283185307)),float(fmod(time*1.733,6.283185307))},uint32_t(fmod(time*2.,4294967296.)),realSeconds,float(time)};Step<<<(n+255)/256,256,0,s>>>(p,n,d,in,effects,hands,bodies,world,grid,nb,previous,poses,v,a,forces,torques,lights,nl,airflows,airflowCount,space,dt,reactionDt,clock);}}
+void PopulationStep(cudaStream_t s,PopulationStateGpu* p,uint32_t n,const LabPopulationDescV1& d,const LabPopulationInputV1& in,const LabPopulationEffectsV1& effects,const LabPopulationHandsV1& hands,const PopulationBodyGpu* bodies,PopulationBodyPoseGpu* world,uint32_t* grid,uint32_t nb,const PxTransform* previous,const PxTransform* poses,const PxVec3* v,const PxVec3* a,PxVec3* forces,PxVec3* torques,const PhysicsLightGpu* lights,uint32_t nl,const PhysicsAirflowGpu* airflows,uint32_t airflowCount,const LabPopulationSpaceV1& space,float dt,float reactionDt,double time,float realSeconds,bool observerPresent){if(n){if(nb)PrepareBodies<<<(nb+63)/64,64,0,s>>>(bodies,world,grid,nb,poses);PopulationClock clock{{float(fmod(time*.713,6.283185307)),float(fmod(time*1.117,6.283185307)),float(fmod(time*1.733,6.283185307))},uint32_t(fmod(time*2.,4294967296.)),realSeconds,float(time)};Step<<<(n+255)/256,256,0,s>>>(p,n,d,in,effects,hands,bodies,world,grid,nb,previous,poses,v,a,forces,torques,lights,nl,airflows,airflowCount,space,dt,reactionDt,clock,observerPresent);}}
 void PopulationPack(cudaStream_t s,const PopulationStateGpu* p,uint32_t n,uint32_t capacity,const LabPopulationDescV1& d,const LabPopulationInputV1& in,const LabPopulationEffectsV1& effects,const PopulationBodyGpu* bodies,const PopulationBodyPoseGpu* world,uint32_t nb,const PhysicsLightGpu* lights,uint32_t nl,const PxTransform* poses,bool visible,GpuInstance* instances,uint32_t* control,uint32_t base,PopulationSummaryGpu* summary,uint64_t frame,uint64_t tick,float alpha,float realSeconds){
     ResetSummary<<<1,1,0,s>>>(summary,control,base,capacity,n,visible,frame,tick);if(n)Pack<<<(n+255)/256,256,0,s>>>(p,n,capacity,d,in,visible,instances,base,summary,alpha);Details<<<1,64,0,s>>>(p,n,d,in,visible,instances,base,summary,alpha);Shadows<<<(LAB_POPULATION_SHADOW_MAX_V1+255)/256,256,0,s>>>(p,n,d,effects,bodies,world,nb,lights,nl,poses,instances,base,visible,alpha);Finish<<<1,64,0,s>>>(p,n,capacity,d,visible,instances,control,base,summary,realSeconds);
 }

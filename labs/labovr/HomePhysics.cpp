@@ -357,7 +357,8 @@ void HomePhysics::Update(uint64_t frame,double now,std::span<const SceneLight> a
     Require(physics_->SetPopulationHands(physics_->serviceContext,scene_,&sweeps_),"Home physics_v1: hand sweeps rejected");
     LabFogInputV1 fogInput{sizeof(fogInput),visible_};std::copy_n(sweeps_.hand,2,fogInput.hand);
     Require(gpu_->SetFogInput(gpu_->serviceContext,&fogInput),"Home gpu_v1: volume hand input rejected");
-    populationInput_.hands[0]=hands_[0];populationInput_.hands[1]=hands_[1];populationInput_.enabled=visible_;
+    // Hiding the home layer removes the observer, not its living simulation.
+    populationInput_.hands[0]=hands_[0];populationInput_.hands[1]=hands_[1];populationInput_.enabled=1;
     Require(physics_->SetPopulationInput(physics_->serviceContext,scene_,&populationInput_),"Home physics_v1: tracked population input rejected");
     physics_->PollPopulation(physics_->serviceContext,scene_,&population_);
     UpdateFan(frame);

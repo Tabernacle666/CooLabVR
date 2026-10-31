@@ -1,6 +1,7 @@
 #include "PhysicsRuntime.h"
 #include "PhysicsCuda.h"
 #include "PopulationCuda.h"
+#include "PopulationPolicy.h"
 #include "Core.h"
 #include "SessionLog.h"
 #include "ConsoleSpec.h"
@@ -886,12 +887,13 @@ uint32_t PhysicsRuntime::Impl::Scene::ResizePopulation(uint32_t n){
     insectCount=n;return 1;
 }
 void PhysicsRuntime::Impl::Scene::StepPopulation(){
-    if(!insectCapacity||!visible||!populationInput.enabled)return;
+    const auto policy=PopulationPolicy(insectCapacity!=0,populationInput.enabled!=0,visible);
+    if(!policy.simulate)return;
     insectAccumulator+=desc.fixedStepSeconds;
     constexpr double step=1./120.;
     while(insectAccumulator+1e-9>=step){insectAccumulator-=step;
     Cuda(cudaMemsetAsync(populationGrid,0,PopulationGridWords*sizeof(uint32_t),stream),"clear population broadphase");
-    PopulationStep(stream,insects,insectCount,population,populationInput,populationEffects,populationHands,populationBodies,populationBodyPoses,populationGrid,uint32_t(populationBodyHost.size()),previous,current,velocity,angular,forces,torques,lightDevice,uint32_t(lightHost.size()),airflowDevice,uint32_t(airflowHost.size()),populationSpace,float(step),desc.fixedStepSeconds,simulationTime,float(populationSeconds));Cuda(cudaGetLastError(),"advance compact GPU flight and contacts");}
+    PopulationStep(stream,insects,insectCount,population,populationInput,populationEffects,populationHands,populationBodies,populationBodyPoses,populationGrid,uint32_t(populationBodyHost.size()),previous,current,velocity,angular,forces,torques,lightDevice,uint32_t(lightHost.size()),airflowDevice,uint32_t(airflowHost.size()),populationSpace,float(step),desc.fixedStepSeconds,simulationTime,float(populationSeconds),policy.observerPresent);Cuda(cudaGetLastError(),"advance compact GPU flight and contacts");}
 }
 void PhysicsRuntime::Impl::Scene::QueuePopulationReadback(){
     auto& r=populationReadbacks[populationReadCursor];if(r.pending){auto ready=cudaEventQuery(r.done);if(ready==cudaErrorNotReady)return;Cuda(ready,"population readback reuse");}
