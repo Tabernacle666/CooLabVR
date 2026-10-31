@@ -63,7 +63,7 @@ void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
 void HomePhysics::Unload(){
     if(!scene_)return;auto opticalOff=optical_;opticalOff.enabled=0;gpu_->SetPopulationOpticalSettings(gpu_->serviceContext,&opticalOff);audio_->SetAcousticBoxes(audio_->serviceContext,nullptr,0);auto off=fog_;off.enabled=0;Require(gpu_->SetFogSettings(gpu_->serviceContext,&off),"Home gpu_v1: volume detach rejected");Require(gpu_->SetPublicationProvider(gpu_->serviceContext,nullptr),"Home gpu_v1: detach failed");
     LabAudioEmitterBatchV1 silence{1,sizeof(silence),0,nullptr,0,0};Require(audio_->PublishEmitters(audio_->serviceContext,&silence),"Home audio_v1: emitter detach failed");Require(physics_->DestroyScene(physics_->serviceContext,scene_),"Home physics_v1: scene destruction failed");
-    entities_.clear();connections_.clear();selections_.clear();scene_=0;fanBodies_={};fanCcd_=false;hands_={};grips_={};handTracked_={};handColliding_={};provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
+    entities_.clear();connections_.clear();selections_.clear();scene_=0;fanBodies_={};fanCcd_=false;vaseBase_=bonsaiBody_=0;rockBodies_={};hands_={};grips_={};handTracked_={};handColliding_={};provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
 }
 void HomePhysics::SetVisible(bool visible){
     visible_=visible;PublishAcoustics();PublishOptical();
@@ -186,43 +186,47 @@ void HomePhysics::Build(SceneData& assets){
     // wall sections. Only the rim is open; neither contents nor tree are jointed.
     buildingGroup_=5;
     const XMFLOAT3 potOrigin{-.44f,1.135f,1.15f};
-    auto potDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,potOrigin,{.073f,.012f,.073f},.30f,RoomLayer);
+    auto potDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,potOrigin,{.073f,.012f,.073f},.40f,RoomLayer);
     potDesc.collisionGroup=0x600u;potDesc.staticFriction=.9f;
-    auto pot=Body(potDesc);entities_.back().id="vase-base";entities_.back().name="Terracotta vase";
+    auto pot=Body(potDesc);vaseBase_=pot;entities_.back().id="vase-base";entities_.back().name="Terracotta vase";
     Visual(pot,Pot,Material::Terracotta,{1,1,1},PoseAt({0,-.003f,0}));
     constexpr uint32_t wallCount=12;
     for(uint32_t i=0;i<wallCount;i++){
         float angle=XM_2PI*float(i)/float(wallCount);
         XMFLOAT3 offset{.095f*std::cos(angle),.092f,.095f*std::sin(angle)};
         auto q=Rotation(0,XM_PIDIV2-angle,0);
-        auto wall=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,Add(potOrigin,offset),{.028f,.087f,.011f},.035f,RoomLayer);
+        auto wall=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,Add(potOrigin,offset),{.028f,.087f,.011f},.010f,RoomLayer);
         wall.pose.orientation=q;wall.collisionGroup=0x600u;wall.staticFriction=.9f;
         auto part=Body(wall);entities_.back().id="vase-wall-"+std::to_string(i);entities_.back().name="Vase wall "+std::to_string(i+1);
         Joint(Connection(pot,part,PoseAt(offset,q),PoseAt({0,0,0}),false));
     }
-    // Five spaced rings of eight independent, slightly asymmetric convex prisms.
+    // Two low, non-overlapping layers keep the initial center of mass near the
+    // base. Each layer has a center rock plus inner and outer rings (1+8+11).
     // The vertex array is borrowed only for synchronous PhysX cooking.
     buildingGroup_=6;
     for(uint32_t i=0;i<40;i++){
-        uint32_t row=i/8,col=i%8;float angle=XM_2PI*(float(col)+.25f*float(row&1))/8.f;
-        XMFLOAT3 center{potOrigin.x+.049f*std::cos(angle),1.161f+.025f*float(row),potOrigin.z+.049f*std::sin(angle)};
-        float width=.012f+.001f*float(i%3),depth=.012f+.001f*float((i+1)%3);
+        uint32_t row=i/20,slot=i%20;
+        float radius=slot==0?0.f:slot<=8?.037f:.065f;
+        uint32_t count=slot<=8?8u:11u,index=slot<=8?slot-1:slot-9;
+        float angle=slot==0?0.f:XM_2PI*(float(index)+.24f*float(row))/float(count);
+        XMFLOAT3 center{potOrigin.x+radius*std::cos(angle),1.158f+.022f*float(row),potOrigin.z+radius*std::sin(angle)};
+        float width=.008f+.0003f*float(i%3),depth=.008f+.0003f*float((i+1)%3);
         std::array<LabVec3V1,8> vertices{};
         for(uint32_t k=0;k<8;k++){
             float x=(k&1)?width:-width,z=(k&2)?depth:-depth;
             vertices[k]={x*(1.f+.12f*std::sin(float(i*7+k*3))),k<4?-.009f:.009f,
                 z*(1.f+.10f*std::cos(float(i*11+k*5)))};
         }
-        auto rock=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_CONVEX,center,{.016f,.010f,.016f},.045f,RoomLayer);
+        auto rock=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_CONVEX,center,{.012f,.010f,.012f},.007f,RoomLayer);
         rock.convexVertices=vertices.data();rock.convexVertexCount=uint32_t(vertices.size());rock.staticFriction=.8f;rock.dynamicFriction=.65f;rock.restitution=.02f;
-        auto body=Body(rock);entities_.back().id="vase-rock-"+std::to_string(i);entities_.back().name="Grey rock "+std::to_string(i+1);
+        auto body=Body(rock);rockBodies_[i]=body;entities_.back().id="vase-rock-"+std::to_string(i);entities_.back().name="Grey rock "+std::to_string(i+1);
         Visual(body,Rock,Material::Rock,{width,.011f,depth});
     }
     buildingGroup_=7;
-    auto tree=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_SPHERE,{potOrigin.x,1.320f,potOrigin.z},{.045f,0,0},.006f,RoomLayer);
+    auto tree=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_SPHERE,{potOrigin.x,1.225f,potOrigin.z},{.030f,0,0},.0007f,RoomLayer);
     tree.staticFriction=.85f;tree.angularDamping=.30f;
-    auto bonsai=Body(tree);entities_.back().id="vase-bonsai";entities_.back().name="Bonsai tree";
-    Visual(bonsai,uint32_t(Mesh::Sphere),Material::Bark,{.075f,.045f,.075f});
+    auto bonsai=Body(tree);bonsaiBody_=bonsai;entities_.back().id="vase-bonsai";entities_.back().name="Bonsai tree";
+    Visual(bonsai,uint32_t(Mesh::Sphere),Material::Bark,{.060f,.060f,.060f});
     Visual(bonsai,uint32_t(Mesh::Cylinder),Material::Bark,{.019f,.22f,.019f},PoseAt({0,.095f,0}));
     for(uint32_t i=0;i<5;i++){
         float a=XM_2PI*float(i)/5.f;XMFLOAT3 branch{.055f*std::cos(a),.18f+.025f*float(i%2),.055f*std::sin(a)};
@@ -445,6 +449,20 @@ void HomePhysics::Update(uint64_t frame,double now,std::span<const SceneLight> a
         auto base=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==fanBase_;});
         if(base!=states_.begin()+stateCount_)LogEvent(frame,"home.mechanisms","frozen=%u fan_enabled=%u set_rpm=%.1f actual_rpm=%.1f base_xyz=%.4f,%.4f,%.4f base_v=%.4f,%.4f,%.4f rotor_xyz=%.4f,%.4f,%.4f rotor_q=%.4f,%.4f,%.4f,%.4f grip_l=%u grip_r=%u lamp=%u",
             unsigned(frozen_),unsigned(fanEnabled_),fanRpm_,fanActualRpm_,base->pose.position.x,base->pose.position.y,base->pose.position.z,base->linearVelocity.x,base->linearVelocity.y,base->linearVelocity.z,rotor.pose.position.x,rotor.pose.position.y,rotor.pose.position.z,q.x,q.y,q.z,q.w,unsigned(grips_[0]!=0),unsigned(grips_[1]!=0),unsigned(LampEnabled()));
+        auto vase=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==vaseBase_;});
+        auto tree=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==bonsaiBody_;});
+        if(vase!=states_.begin()+stateCount_&&tree!=states_.begin()+stateCount_){
+            auto orientation=vase->pose.orientation;
+            LabQuatV1 inverse{-orientation.x,-orientation.y,-orientation.z,orientation.w};
+            uint32_t inside=0;
+            for(const auto& s:std::span(states_.data(),stateCount_))if(std::find(rockBodies_.begin(),rockBodies_.end(),s.body)!=rockBodies_.end()){
+                auto local=Rotated(Sub(V(s.pose.position),V(vase->pose.position)),inverse);
+                if(local.x*local.x+local.z*local.z<.09f*.09f&&local.y>-.01f&&local.y<.19f)++inside;
+            }
+            LogEvent(frame,"home.vase","base_xyz=%.4f,%.4f,%.4f up=%.3f tree_xyz=%.4f,%.4f,%.4f rocks_inside=%u",
+                vase->pose.position.x,vase->pose.position.y,vase->pose.position.z,Rotated({0,1,0},orientation).y,
+                tree->pose.position.x,tree->pose.position.y,tree->pose.position.z,inside);
+        }
     }
     bool sampled=sourceFrame_&&sourceFrame_<=frame&&frame-sourceFrame_<6;
     UpdateHands(input,dt,trackingReset,sampled,commands);
