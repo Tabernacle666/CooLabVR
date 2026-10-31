@@ -229,6 +229,9 @@ int RenderThread(Channels& io,const RunOptions& options) {
             HapticEvent h;while(io.haptics.pop(h))xr.Haptic(h);PhysicsEvent event;while(io.physicsEvents.pop(event)){LogEvent(event.inputFrameId,"physics.event","kind=%u a=%llu b=%llu hand=%u strength=%.4f xyz=%.4f,%.4f,%.4f",uint32_t(event.kind),static_cast<unsigned long long>(event.a.value),static_cast<unsigned long long>(event.b.value),event.hand,event.strength,event.position.x,event.position.y,event.position.z);}
         }
         if(frame.render){
+            const bool captureHands=options.diagnosticSeconds&&diagnosticSlot<diagnosticViews.size();
+            if(captureHands){const auto& view=diagnosticViews[diagnosticSlot];home.SetDiagnosticHands(true,view.position,view.target);}
+            else home.SetDiagnosticHands(false);
             bool prepared;
             {
                 auto scope=performance.Measure(CpuStage::GraphicsPrepare);

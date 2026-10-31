@@ -29,6 +29,8 @@ class HomeWorld final:public WorldLayer {
     HomeCommand command_{};
     uint32_t hover_{Invalid};
     bool loaded_{},worldPage_{},visualPage_{},menuVisible_{true},ambientVisible_{true};
+    bool diagnosticHands_{};
+    Pose diagnosticCamera_{};
     uint32_t worldPageIndex_{};
     enum class PanelAction:uint32_t {None,Select,Expand,TreeScroll,Tab,Freeze,Theme,Face,Profile,Translate,Speed,Flight,Effects,Fog,Fan,Optical,Population,Lamp,Rotate,LocalReset,Size,Capture,CaptureEye,CaptureInterface,Touch,HandResponse,Antialiasing,Transport,Surface,FanYaw,Multisampling,PopulationSpace};
     struct PanelControl {LabU64 id{},node{};PanelAction action{};uint32_t index{};float sign{};};
@@ -62,6 +64,10 @@ public:
     void SetLampEnabled(bool value){physics_.SetLampEnabled(value);}
     void LoadConfiguration(const std::wstring& path){physics_.LoadConfiguration(path);}
     void ApplyDiagnosticDefaults(){physics_.ApplyDiagnosticDefaults();BuildPanel();}
+    void SetDiagnosticHands(bool enabled,XMFLOAT3 position={},XMFLOAT3 target={}){
+        diagnosticHands_=enabled;
+        if(enabled)diagnosticCamera_=FromMatrix(XMMatrixInverse(nullptr,XMMatrixLookAtLH(XMLoadFloat3(&position),XMLoadFloat3(&target),XMVectorSet(0,1,0,0))));
+    }
     void SetDiagnosticFogEnabled(bool enabled){physics_.SetDiagnosticFogEnabled(enabled);}
     uint32_t DiagnosticPopulation()const{return physics_.PopulationCount();}
     const LabPopulationSnapshotV1& DiagnosticPopulationSnapshot()const{return physics_.Population();}

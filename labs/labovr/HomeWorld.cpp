@@ -133,6 +133,24 @@ void HomeWorld::FillAudio(AudioFrame& a,const FrameInput& input,double now)noexc
     lastListener_=input.head;lastListenerAt_=input.time;a.velocity=listenerVelocity_;
 }
 void HomeWorld::Append(RenderScene& r,const FrameInput& input,double)const{
+    if(diagnosticHands_){
+        std::array<PoseActionState,2> hands{};
+        for(uint32_t hand=0;hand<2;hand++){
+            const float side=hand?1.f:-1.f;
+            const XMMATRIX local=XMMatrixRotationX(-.12f)*XMMatrixRotationY(-side*.16f)*XMMatrixTranslation(side*.22f,-.20f,.68f);
+            hands[hand].pose=FromMatrix(local*Matrix(diagnosticCamera_));hands[hand].tracked=true;
+        }
+        AppendClientHands(r,input,&hands);
+        for(uint32_t hand=0;hand<2;hand++){
+            const auto& pose=hands[hand].pose;
+            RenderObject beam;beam.current=pose;beam.current.p=Transform({0,0,.65f},pose);beam.previous=beam.current;
+            beam.scale={.003f,.003f,1.2f};beam.mesh=uint32_t(Mesh::Box);beam.material=uint32_t(hand?Material::HandRight:Material::HandLeft);
+            beam.id=0xa0000100u+hand;beam.flags=DynamicObject|NoCollision|NoShadow|NoRayTracing;r.objects.push_back(beam);++r.count;
+            RenderObject point=beam;point.current.p=Transform({0,0,1.25f},pose);point.previous=point.current;
+            point.scale={.012f,.012f,.012f};point.mesh=uint32_t(Mesh::Sphere);point.id=0xa0000110u+hand;r.objects.push_back(point);++r.count;
+        }
+        return;
+    }
     std::array<PoseActionState,2> hands{physics_.HandState(0),physics_.HandState(1)};AppendClientHands(r,input,&hands);
     if(!ambientVisible_&&!menuVisible_)return;
     for(uint32_t hand=0;hand<2;hand++){
