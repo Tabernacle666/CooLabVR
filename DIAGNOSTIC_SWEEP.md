@@ -211,3 +211,25 @@ inclure du travail GPU et de la synchronisation et ne mesure pas un noyau
 PhysX isole. Les sous-pas suivants sont regroupes, meme si la configuration
 actuelle en autorise au plus deux par frame. Ces mesures sont agregees sans
 synchronisation GPU supplementaire et n'ajoutent pas de ligne de profil.
+
+
+## Verification de la population quand Home est masque
+
+Après les deux captures et le profil GPU, le diagnostic masque temporairement
+la couche Home. Il compare deux lectures GPU de la position du même insecte,
+prises après le masquage et séparées d'au moins huit frames. Un avancement de
+la scène seule ne suffit pas à réussir. La couche est restaurée à la fin.
+
+La ligne `sweep.population_continuity` est recopiée dans `manifest.json` :
+`result=pass` signifie qu'un déplacement a été observé ; `result=fail` indique
+que des individus comparables sont restés immobiles ; `result=inconclusive`
+signifie qu'aucun individu comparable n'a pu être obtenu dans le délai. Les
+cas fail et inconclusive empêchent de qualifier le cycle de complet. Ce test
+ne prouve ni la sauvegarde après fermeture ni l'absence de toute interaction
+fantôme avec le joueur. La phase masquée est exclue des moyennes CPU de base.
+
+Attention : les lignes `physics.profile.*` sont agrégées pour toute la vie
+de la scène, y compris la phase de continuité masquée. Elles ne doivent pas
+être comparées directement à celles d'un cycle antérieur qui ne comportait
+pas cette phase ; les moyennes `sweep.cpu` et le burst GPU de référence
+restent séparés.

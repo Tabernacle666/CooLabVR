@@ -91,6 +91,7 @@ try {
     $xrProfile = $null
     $gpuTiming = @()
     $gpuExperiment = $null
+    $continuity = $null
     $gpuPasses = @()
     $gpuQueues = @()
     if(Test-Path -LiteralPath $gameLog -PathType Leaf) {
@@ -107,6 +108,8 @@ try {
         $physicsProfile = @($lines | Where-Object { $_ -match '\tphysics\.profile\.' } |
             ForEach-Object { [string]::Copy($_.ToString()) })
         $xrRows = @($lines | Where-Object { $_ -match '\tsweep\.xr\t' } | Select-Object -Last 1)
+        $continuityRows = @($lines | Where-Object { $_ -match '\tsweep\.population_continuity\t' } | Select-Object -Last 1)
+        if($continuityRows.Count) { $continuity = [string]$continuityRows[0] }
         $gpuTimingRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_timing\t' })
         $gpuExperimentRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_experiment\t' } | Select-Object -Last 1)
         if($xrRows.Count) { $xrProfile = [string]$xrRows[0] }
@@ -153,6 +156,10 @@ try {
         $errors.Add('GPU/OpenXR performance profile incomplete')
         Note 'ERROR: missing GPU/OpenXR performance profile'
     }
+    if(($null -ne $gameExit) -and (-not $continuity -or $continuity -notmatch 'result=pass\b')) {
+        $errors.Add('Hidden population continuity was not verified')
+        Note 'ERROR: hidden population continuity was not verified'
+    }
     if($gameExit -eq 0 -and $physicsProfile.Count -ne 7) {
         $errors.Add("Physics telemetry incomplete: received $($physicsProfile.Count)/7 profile records")
         Note "ERROR: expected seven physics.profile records; received $($physicsProfile.Count)"
@@ -179,6 +186,7 @@ try {
         performance_summary = $summary
         performance_cpu = $cpuMetrics
         performance_gpu = $gpuMetrics
+        population_continuity = $continuity
         performance_physics = @($physicsProfile)
         performance_xr = $xrProfile
         performance_gpu_timing = @($gpuTiming)

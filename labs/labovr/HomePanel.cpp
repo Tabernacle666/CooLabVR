@@ -81,7 +81,7 @@ void HomeWorld::BuildPanel(){
         const char* speeds[]{"FINE .01 M/S","NORMAL .15 M/S","FAST .75 M/S"};button(PanelAction::Speed,0,speeds[physics_.EditSpeed()]);
         if(selectedNode_==25)parameter(PanelAction::Rotate,0,"YAW STEP / DEGREES",15);
         if(selectedNode_==3)parameter(PanelAction::FanYaw,0,"FAN YAW STEP / DEGREES",5);
-        button(PanelAction::LocalReset,0,"RESET TO LAST VALID");text("INVALID LAYOUT: RESUME / SAVE REFUSED");
+        button(PanelAction::LocalReset,0,"RESET TO LAST VALID");text("INVALID LAYOUT BLOCKS RESUME / SAVE");
     }else if(inspectorTab_==1){
         if(selectedNode_==28){button(PanelAction::Capture,0,"CAPTURE PNG");button(PanelAction::CaptureEye,0,physics_.CaptureEye()?"EYE RIGHT / LEFT":"EYE LEFT / RIGHT");button(PanelAction::CaptureInterface,0,physics_.CaptureInterface()?"INTERFACE INCLUDED / HIDE":"INTERFACE HIDDEN / INCLUDE");text("LEFT X OR Y / PRESS ONCE");const auto& capture=physics_.CaptureStatus();text(capture.message);text("DESTINATION");std::string dir=capture.directoryUtf8;for(size_t i=0;i<dir.size();i+=42)text(dir.substr(i,42).c_str());}
         if(selectedNode_==3||selectedNode_==4)button(PanelAction::Fan,0,physics_.FanEnabled()?"FAN ON / OFF":"FAN OFF / ON");

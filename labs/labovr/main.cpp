@@ -6,6 +6,7 @@
 #include "ClientAssets.h"
 #include "ClientLayers.h"
 #include "HomeWorld.h"
+#include "PopulationContinuityCheck.h"
 #include "LabInputMapping.h"
 #include "LabAudio.h"
 #include "PerformanceCapture.h"
@@ -120,6 +121,10 @@ int RenderThread(Channels& io,const RunOptions& options) {
     constexpr uint64_t DiagnosticGpuTotalFrames=DiagnosticGpuBurstFrames*2;
     bool diagnosticGpuActive=false,diagnosticGpuFinished=false,diagnosticFogDisabled=false;
     uint64_t diagnosticGpuFrames=0,diagnosticFogOffFirstFrame=0;
+    PopulationContinuityCheck diagnosticContinuity;
+    bool diagnosticHiddenActive=false,diagnosticContinuityPassed=false;
+    uint64_t diagnosticHiddenFirstFrame=0;
+    double diagnosticHiddenStarted=0.;
     StageCpu xrWaitCpu,xrBeginCpu,xrSyncCpu,xrLocateCpu,xrAcquireColorCpu,
         xrWaitColorCpu,xrAcquireDepthCpu,xrWaitDepthCpu,xrEndCpu;
     if(options.diagnosticSeconds){
@@ -183,7 +188,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
             auto scope=performance.Measure(CpuStage::HomeUpdate);
             const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
             home.Update(frame.input,now,attractive);
-            if(options.diagnosticSeconds&&!diagnosticGpuActive)homeCpu.Add((QpcNowSeconds()-begin)*1000.);
+            if(options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished)homeCpu.Add((QpcNowSeconds()-begin)*1000.);
         }
         HomeCommand command=home.ConsumeCommand();
         if(command.kind==HomeCommandKind::NewSession){activeWorldId="home";activeWorldName="Home";menuVisible=true;activeWorldRetainsHomeAmbient=true;home.SetMenuVisible(true);pluginHost.SetInputCaptured(false);worlds.UnloadActive();activePlugin.reset();activeModule.reset();pluginHost.ClearWorldServices();clientInput.SetNavigationOptions(true,true);graphics.WaitIdle();worlds.ResetPersistent(home);home.SetAmbientVisible(true);presentation.Set(home.Contributions());SceneData scene=home.Scene();graphics.WaitIdle();graphics.ReplaceScene(scene,presentation.Contributions());audio.LoadScene(scene);}
@@ -215,7 +220,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
             auto scope=performance.Measure(CpuStage::PhysicsAdvance);
             const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
             physics.Advance(now,frame.input.frameId);
-            if(options.diagnosticSeconds&&!diagnosticGpuActive)physicsCpu.Add((QpcNowSeconds()-begin)*1000.);
+            if(options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished)physicsCpu.Add((QpcNowSeconds()-begin)*1000.);
         }
         home.PublishMenu();
         {
@@ -229,7 +234,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 auto scope=performance.Measure(CpuStage::GraphicsPrepare);
                 const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
                 prepared=graphics.Prepare(frame.input);
-                if(options.diagnosticSeconds&&!diagnosticGpuActive)prepareCpu.Add((QpcNowSeconds()-begin)*1000.);
+                if(options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished)prepareCpu.Add((QpcNowSeconds()-begin)*1000.);
             }
             if(prepared){
                 bool acquired;
@@ -238,7 +243,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                     const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
                     xr.LocateLate(frame);
                     acquired=frame.tracked&&xr.AcquireSwapchains(frame);
-                    if(options.diagnosticSeconds&&!diagnosticGpuActive)acquireCpu.Add((QpcNowSeconds()-begin)*1000.);
+                    if(options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished)acquireCpu.Add((QpcNowSeconds()-begin)*1000.);
                     if(diagnosticGpuActive){
                         xrLocateCpu.Add(frame.performanceTiming.locateViewsMs);
                         xrAcquireColorCpu.Add(frame.performanceTiming.acquireColorMs);
@@ -276,7 +281,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                     auto scope=performance.Measure(CpuStage::GraphicsRender);
                     const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
                     graphics.Render(frame);
-                    if(options.diagnosticSeconds&&!diagnosticGpuActive)submitCpu.Add((QpcNowSeconds()-begin)*1000.);
+                    if(options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished)submitCpu.Add((QpcNowSeconds()-begin)*1000.);
                 }
             }
         }
@@ -290,7 +295,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
         double displayBudgetMs=double(frame.displayPeriod)/1'000'000.0;
         if(!options.diagnosticSeconds)
             LogEvent(frame.input.frameId,"vr.frame","render_requested=%u tracked=%u submitted=%u abandoned=%u active_cpu_ms=%.4f display_budget_ms=%.4f cpu_over_budget=%u",unsigned(frame.render),unsigned(frame.tracked),unsigned(frame.submitted),unsigned(frame.render&&!frame.submitted),activeCpuMs,displayBudgetMs,unsigned(displayBudgetMs>0&&activeCpuMs>displayBudgetMs));
-        if(options.diagnosticSeconds&&!diagnosticGpuActive){
+        if(options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished){
             ++diagnosticFrames;diagnosticTracked+=frame.tracked?1:0;diagnosticSubmitted+=frame.submitted?1:0;
             diagnosticRenderRequested+=frame.render?1:0;
             diagnosticCpuTotal+=activeCpuMs;diagnosticCpuPeak=(std::max)(diagnosticCpuPeak,activeCpuMs);
@@ -316,11 +321,36 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 diagnosticFogDisabled=false;
                 LogEvent(0,"sweep.gpu_profile_end","frames=%llu",
                     static_cast<unsigned long long>(diagnosticGpuFrames));
-                io.stop=true;
+                // Verify a loaded but hidden home after both reference images
+                // and the GPU burst; never mix this phase into their metrics.
+                home.SetAmbientVisible(false);
+                diagnosticHiddenActive=true;
+                diagnosticHiddenFirstFrame=frame.input.frameId;
+                diagnosticHiddenStarted=QpcNowSeconds();
+            }
+        }
+        if(diagnosticHiddenActive&&frame.input.frameId>diagnosticHiddenFirstFrame){
+            const auto& sample=home.DiagnosticPopulationSnapshot();
+            if(diagnosticContinuity.Observe(sample,diagnosticHiddenFirstFrame)){
+                diagnosticContinuityPassed=true;
+                LogEvent(frame.input.frameId,"sweep.population_continuity",
+                    "result=pass baseline_frame=%llu sample_frame=%llu insect=%u distance_m=%.6f comparisons=%llu",
+                    static_cast<unsigned long long>(diagnosticContinuity.BaselineFrame()),
+                    static_cast<unsigned long long>(sample.sourceFrame),diagnosticContinuity.Witness(),
+                    diagnosticContinuity.Distance(),static_cast<unsigned long long>(diagnosticContinuity.Comparisons()));
+                home.SetAmbientVisible(true);diagnosticHiddenActive=false;io.stop=true;
+            }else if(QpcNowSeconds()-diagnosticHiddenStarted>=3.){
+                const char* result=diagnosticContinuity.Comparisons()?"fail":"inconclusive";
+                LogEvent(frame.input.frameId,"sweep.population_continuity",
+                    "result=%s baseline_frame=%llu sample_frame=%llu comparisons=%llu",result,
+                    static_cast<unsigned long long>(diagnosticContinuity.BaselineFrame()),
+                    static_cast<unsigned long long>(sample.sourceFrame),static_cast<unsigned long long>(diagnosticContinuity.Comparisons()));
+                diagnosticFailed=true;home.SetAmbientVisible(true);diagnosticHiddenActive=false;io.stop=true;
             }
         }
     }
     io.stop=true;
+    if(diagnosticHiddenActive){home.SetAmbientVisible(true);diagnosticHiddenActive=false;}
     if(diagnosticGpuActive){
         graphics.EndPerformanceCapture();
         xr.SetPerformanceCaptureActive(false);
@@ -428,7 +458,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 xrAcquireColorCpu.Average(),xrWaitColorCpu.Average(),xrAcquireDepthCpu.Average(),
                 xrWaitDepthCpu.Average(),xrEndCpu.Average());
         }
-        if(diagnosticFailed||diagnosticSlot!=diagnosticViews.size())return 3;
+        if(diagnosticFailed||!diagnosticContinuityPassed||diagnosticSlot!=diagnosticViews.size())return 3;
     }
     return options.gpuValidation&&!clean?2:0;
 }

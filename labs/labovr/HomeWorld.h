@@ -64,6 +64,7 @@ public:
     void ApplyDiagnosticDefaults(){physics_.ApplyDiagnosticDefaults();BuildPanel();}
     void SetDiagnosticFogEnabled(bool enabled){physics_.SetDiagnosticFogEnabled(enabled);}
     uint32_t DiagnosticPopulation()const{return physics_.PopulationCount();}
+    const LabPopulationSnapshotV1& DiagnosticPopulationSnapshot()const{return physics_.Population();}
     const LabFogSettingsV1& DiagnosticFog()const{return physics_.Fog();}
     uint32_t DiagnosticTheme()const{return physics_.PanelTheme();}
     void SetWorldNames(std::vector<std::string>);
