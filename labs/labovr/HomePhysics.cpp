@@ -185,6 +185,13 @@ void HomePhysics::ApplyDiagnosticDefaults(){
     LogEvent(sourceFrame_,"sweep.settings","theme=amber night=dark_room fog_enabled=%u fog_density=%.4f population=%u lamp=%u",
         fog_.enabled,fog_.density,populationCount_,unsigned(LampEnabled()));
 }
+void HomePhysics::SetDiagnosticFogEnabled(bool enabled){
+    if(!gpu_||!scene_)Fail("Diagnostic fog toggle requires an active scene");
+    // Transient GPU override only: do not touch user profile or fog_.
+    auto settings=fog_;settings.enabled=enabled&&visible_&&fog_.enabled?1u:0u;
+    Require(gpu_->SetFogSettings(gpu_->serviceContext,&settings),
+        "Home diagnostic fog toggle rejected");
+}
 void HomePhysics::AddPopulation(int32_t delta){
     uint32_t n=uint32_t(std::clamp(int64_t(populationCount_)+delta,int64_t(0),int64_t(LAB_PHYSICS_POPULATION_MAX_V1)));
     Require(physics_->SetPopulationCount(physics_->serviceContext,scene_,n),"Home physics_v1: population batch rejected");

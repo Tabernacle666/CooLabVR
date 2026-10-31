@@ -62,6 +62,7 @@ public:
     void SetLampEnabled(bool value){physics_.SetLampEnabled(value);}
     void LoadConfiguration(const std::wstring& path){physics_.LoadConfiguration(path);}
     void ApplyDiagnosticDefaults(){physics_.ApplyDiagnosticDefaults();BuildPanel();}
+    void SetDiagnosticFogEnabled(bool enabled){physics_.SetDiagnosticFogEnabled(enabled);}
     uint32_t DiagnosticPopulation()const{return physics_.PopulationCount();}
     const LabFogSettingsV1& DiagnosticFog()const{return physics_.Fog();}
     uint32_t DiagnosticTheme()const{return physics_.PanelTheme();}

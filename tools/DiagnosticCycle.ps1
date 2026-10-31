@@ -89,7 +89,8 @@ try {
     $gpuMetrics = $null
     $physicsProfile = @()
     $xrProfile = $null
-    $gpuTiming = $null
+    $gpuTiming = @()
+    $gpuExperiment = $null
     $gpuPasses = @()
     $gpuQueues = @()
     if(Test-Path -LiteralPath $gameLog -PathType Leaf) {
@@ -106,9 +107,11 @@ try {
         $physicsProfile = @($lines | Where-Object { $_ -match '\tphysics\.profile\.' } |
             ForEach-Object { [string]::Copy($_.ToString()) })
         $xrRows = @($lines | Where-Object { $_ -match '\tsweep\.xr\t' } | Select-Object -Last 1)
-        $gpuTimingRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_timing\t' } | Select-Object -Last 1)
+        $gpuTimingRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_timing\t' })
+        $gpuExperimentRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_experiment\t' } | Select-Object -Last 1)
         if($xrRows.Count) { $xrProfile = [string]$xrRows[0] }
-        if($gpuTimingRows.Count) { $gpuTiming = [string]$gpuTimingRows[0] }
+        $gpuTiming = @($gpuTimingRows | ForEach-Object { [string]::Copy($_.ToString()) })
+        if($gpuExperimentRows.Count) { $gpuExperiment = [string]$gpuExperimentRows[0] }
         $gpuPasses = @($lines | Where-Object { $_ -match '\tsweep\.gpu_pass\t' } |
             ForEach-Object { [string]::Copy($_.ToString()) })
         $gpuQueues = @($lines | Where-Object { $_ -match '\tsweep\.gpu_queue\t' } |
@@ -146,7 +149,7 @@ try {
             Note ('ERROR JPEG: ' + $_.Exception.Message)
         }
     }
-    if($gameExit -eq 0 -and (-not $xrProfile -or -not $gpuTiming -or $gpuPasses.Count -eq 0)) {
+    if($gameExit -eq 0 -and (-not $xrProfile -or $gpuTiming.Count -ne 2 -or -not $gpuExperiment -or $gpuPasses.Count -eq 0)) {
         $errors.Add('GPU/OpenXR performance profile incomplete')
         Note 'ERROR: missing GPU/OpenXR performance profile'
     }
@@ -178,7 +181,8 @@ try {
         performance_gpu = $gpuMetrics
         performance_physics = @($physicsProfile)
         performance_xr = $xrProfile
-        performance_gpu_timing = $gpuTiming
+        performance_gpu_timing = @($gpuTiming)
+        performance_gpu_experiment = $gpuExperiment
         performance_gpu_passes = @($gpuPasses)
         performance_gpu_queues = @($gpuQueues)
         errors = @($errors.ToArray())

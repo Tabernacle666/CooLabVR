@@ -121,3 +121,19 @@ comparaisons. Le manifeste contient les champs `performance_xr`,
 `performance_gpu_timing`, `performance_gpu_passes` et
 `performance_gpu_queues`. Cet outil ne mesure pas encore le débit hors
 OpenXR; celui-ci requiert un banc de rendu à cible hors écran distinct.
+
+
+### Comparaison A/B temporaire du brouillard
+
+Après les deux captures de référence, un burst de 90 frames avec brouillard
+est suivi de 90 frames avec son volume GPU temporairement désactivé. Le
+brouillard est automatiquement restauré avant la fermeture; aucun profil
+utilisateur n'est modifié. Les lignes `sweep.gpu_timing`,
+`sweep.gpu_pass`, `sweep.gpu_queue` et `sweep.gpu_experiment`
+permettent la comparaison des phases `baseline` et `fog_off`.
+
+`avg_busiest_queue_ms` est la durée maximale mesurée sur une file de commandes
+individuelle par frame, **pas** l'étendue GPU totale. Les horloges Copy,
+Compute et Direct ne sont jamais soustraites entre elles. Un résultat de ce
+test ne justifie pas de désactiver définitivement le brouillard : il renseigne
+sur les étapes à optimiser sans perdre le phénomène visuel.

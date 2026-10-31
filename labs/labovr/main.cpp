@@ -117,8 +117,9 @@ int RenderThread(Channels& io,const RunOptions& options) {
     // The GPU timestamp burst begins after BOTH baseline images have been saved.
     // It does not perturb ordinary CPU timing or the reference screenshots.
     constexpr uint64_t DiagnosticGpuBurstFrames=90;
-    bool diagnosticGpuActive=false,diagnosticGpuFinished=false;
-    uint64_t diagnosticGpuFrames=0;
+    constexpr uint64_t DiagnosticGpuTotalFrames=DiagnosticGpuBurstFrames*2;
+    bool diagnosticGpuActive=false,diagnosticGpuFinished=false,diagnosticFogDisabled=false;
+    uint64_t diagnosticGpuFrames=0,diagnosticFogOffFirstFrame=0;
     StageCpu xrWaitCpu,xrBeginCpu,xrSyncCpu,xrLocateCpu,xrAcquireColorCpu,
         xrWaitColorCpu,xrAcquireDepthCpu,xrWaitDepthCpu,xrEndCpu;
     if(options.diagnosticSeconds){
@@ -147,7 +148,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                             graphics.BeginPerformanceCapture();
                             xr.SetPerformanceCaptureActive(true);
                             diagnosticGpuActive=true;
-                            LogEvent(0,"sweep.gpu_profile_start","frames=%llu",
+                            LogEvent(0,"sweep.gpu_profile_start","frames_per_phase=%llu phases=baseline,fog_off",
                                 static_cast<unsigned long long>(DiagnosticGpuBurstFrames));
                         }
                     }else if(status.state==LAB_CAPTURE_FAILED_V1){
@@ -297,14 +298,26 @@ int RenderThread(Channels& io,const RunOptions& options) {
             diagnosticOverBudget+=(displayBudgetMs>0&&activeCpuMs>displayBudgetMs)?1u:0u;
         }
         performance.EndFrame(frame,graphics,xr,io);
-        if(diagnosticGpuActive&&++diagnosticGpuFrames>=DiagnosticGpuBurstFrames){
-            graphics.EndPerformanceCapture();
-            xr.SetPerformanceCaptureActive(false);
-            diagnosticGpuActive=false;
-            diagnosticGpuFinished=true;
-            LogEvent(0,"sweep.gpu_profile_end","frames=%llu",
-                static_cast<unsigned long long>(diagnosticGpuFrames));
-            io.stop=true;
+        if(diagnosticGpuActive){
+            ++diagnosticGpuFrames;
+            if(diagnosticGpuFrames==DiagnosticGpuBurstFrames){
+                home.SetDiagnosticFogEnabled(false);
+                diagnosticFogDisabled=true;
+                diagnosticFogOffFirstFrame=frame.input.frameId+1;
+                LogEvent(0,"sweep.gpu_phase","phase=fog_off first_frame=%llu",
+                    static_cast<unsigned long long>(diagnosticFogOffFirstFrame));
+            }
+            if(diagnosticGpuFrames>=DiagnosticGpuTotalFrames){
+                graphics.EndPerformanceCapture();
+                xr.SetPerformanceCaptureActive(false);
+                diagnosticGpuActive=false;
+                diagnosticGpuFinished=true;
+                home.SetDiagnosticFogEnabled(true);
+                diagnosticFogDisabled=false;
+                LogEvent(0,"sweep.gpu_profile_end","frames=%llu",
+                    static_cast<unsigned long long>(diagnosticGpuFrames));
+                io.stop=true;
+            }
         }
     }
     io.stop=true;
@@ -312,6 +325,10 @@ int RenderThread(Channels& io,const RunOptions& options) {
         graphics.EndPerformanceCapture();
         xr.SetPerformanceCaptureActive(false);
         diagnosticGpuActive=false;
+    }
+    if(diagnosticFogDisabled){
+        home.SetDiagnosticFogEnabled(true);
+        diagnosticFogDisabled=false;
     }
     std::vector<GpuPerformancePassSample> diagnosticGpuPasses;
     std::vector<GpuQueueFrameAnalysis> diagnosticGpuQueues;
@@ -340,54 +357,70 @@ int RenderThread(Channels& io,const RunOptions& options) {
             double(diagVram.usage)/1048576.,double(diagVram.budget)/1048576.,
             double(diagGpu.dedicatedVramBytes)/1048576.,unsigned(options.gpuValidation));
         if(diagnosticGpuFinished){
-            // GPU timestamps are calibrated across Copy/Compute/Direct queues.
-            // Frame span is not the sum of overlapping queue durations.
-            std::map<uint64_t,std::pair<double,double>> spans;
-            std::map<std::string,std::pair<double,uint64_t>> passTotals;
+            // Clocks from different GPU queues may not share an epoch. Never
+            // subtract a Copy clock timestamp from a Direct clock timestamp.
+            // Compute the longest independently measured queue span per frame.
+            std::array<std::map<uint64_t,double>,2> bottlenecks;
+            std::array<std::map<std::string,std::pair<double,uint64_t>>,2> passTotals;
+            std::array<std::array<std::pair<double,uint64_t>,3>,2> queueSpans{};
+            std::array<std::array<std::pair<double,uint64_t>,3>,2> queueWork{};
+            const auto phaseOf=[&](uint64_t id)->uint32_t{
+                return diagnosticFogOffFirstFrame&&id>=diagnosticFogOffFirstFrame?1u:0u;
+            };
+            for(const auto& sample:diagnosticGpuQueues){
+                if(sample.spanMs<0||sample.spanMs>1000.)continue;
+                uint32_t phase=phaseOf(sample.frameId),queue=uint32_t(sample.queue);
+                if(queue>=3)continue;
+                auto& maxSpan=bottlenecks[phase][sample.frameId];
+                maxSpan=std::max(maxSpan,sample.spanMs);
+                queueSpans[phase][queue].first+=sample.spanMs;++queueSpans[phase][queue].second;
+                queueWork[phase][queue].first+=sample.workMs;++queueWork[phase][queue].second;
+            }
             for(const auto& pass:diagnosticGpuPasses){
-                if(pass.endQpc<=pass.startQpc)continue;
-                auto [it,inserted]=spans.try_emplace(pass.frameId,pass.startQpc,pass.endQpc);
-                if(!inserted){
-                    it->second.first=std::min(it->second.first,pass.startQpc);
-                    it->second.second=std::max(it->second.second,pass.endQpc);
-                }
-                auto& total=passTotals[pass.name];total.first+=pass.milliseconds;++total.second;
+                if(pass.milliseconds<0||pass.milliseconds>1000.)continue;
+                auto& total=passTotals[phaseOf(pass.frameId)][pass.name];
+                total.first+=pass.milliseconds;++total.second;
             }
-            std::vector<double> frameMs;
-            for(const auto& [frameId,extent]:spans){
-                (void)frameId;
-                frameMs.push_back((extent.second-extent.first)*1000.0);
-            }
-            std::sort(frameMs.begin(),frameMs.end());
-            double sum=0.;for(double v:frameMs)sum+=v;
-            const double mean=frameMs.empty()?0.:sum/double(frameMs.size());
-            const double p95=frameMs.empty()?0.:frameMs[size_t(std::ceil(frameMs.size()*.95))-1];
-            const double peak=frameMs.empty()?0.:frameMs.back();
-            LogEvent(0,"sweep.gpu_timing",
-                "sampled_frames=%u passes=%u dropped_passes=%llu avg_span_ms=%.3f p95_span_ms=%.3f peak_span_ms=%.3f",
-                uint32_t(spans.size()),uint32_t(diagnosticGpuPasses.size()),
-                static_cast<unsigned long long>(graphics.PerformanceInfo().droppedGpuPasses),
-                mean,p95,peak);
-            std::vector<std::pair<std::string,std::pair<double,uint64_t>>> ranked(passTotals.begin(),passTotals.end());
-            std::sort(ranked.begin(),ranked.end(),[](const auto& a,const auto& b){
-                return a.second.first>b.second.first;
-            });
-            for(size_t i=0;i<std::min<size_t>(8,ranked.size());++i){
-                const auto& [name,totals]=ranked[i];
-                LogEvent(0,"sweep.gpu_pass","rank=%u name=%s calls=%llu avg_call_ms=%.3f",
-                    uint32_t(i+1),name.c_str(),static_cast<unsigned long long>(totals.second),
-                    totals.second?totals.first/double(totals.second):0.);
-            }
+            const char* phases[]{"baseline","fog_off"};
             const char* queueNames[]{"copy","compute","direct"};
-            for(uint32_t queue=0;queue<3;++queue){
-                double total=0.,work=0.;uint64_t count=0;
-                for(const auto& sample:diagnosticGpuQueues)if(uint32_t(sample.queue)==queue){
-                    total+=sample.spanMs;work+=sample.workMs;++count;
+            double avgBottleneck[2]{};
+            for(uint32_t phase=0;phase<2;++phase){
+                std::vector<double> ms;
+                for(const auto& [frameId,span]:bottlenecks[phase]){
+                    (void)frameId;ms.push_back(span);
                 }
-                LogEvent(0,"sweep.gpu_queue","queue=%s frames=%llu avg_span_ms=%.3f avg_work_ms=%.3f",
-                    queueNames[queue],static_cast<unsigned long long>(count),
-                    count?total/double(count):0.,count?work/double(count):0.);
+                std::sort(ms.begin(),ms.end());
+                double total=0.;for(double v:ms)total+=v;
+                avgBottleneck[phase]=ms.empty()?0.:total/double(ms.size());
+                const double p95=ms.empty()?0.:ms[size_t(std::ceil(ms.size()*.95))-1];
+                LogEvent(0,"sweep.gpu_timing",
+                    "phase=%s sampled_frames=%u avg_busiest_queue_ms=%.3f p95_busiest_queue_ms=%.3f peak_busiest_queue_ms=%.3f dropped_passes=%llu",
+                    phases[phase],uint32_t(ms.size()),avgBottleneck[phase],p95,
+                    ms.empty()?0.:ms.back(),static_cast<unsigned long long>(diagGpu.droppedGpuPasses));
+                std::vector<std::pair<std::string,std::pair<double,uint64_t>>> ranked(
+                    passTotals[phase].begin(),passTotals[phase].end());
+                std::sort(ranked.begin(),ranked.end(),[](const auto& a,const auto& b){return a.second.first>b.second.first;});
+                for(size_t i=0;i<std::min<size_t>(8,ranked.size());++i){
+                    const auto& [name,totals]=ranked[i];
+                    LogEvent(0,"sweep.gpu_pass",
+                        "phase=%s rank=%u name=%s calls=%llu avg_call_ms=%.3f",
+                        phases[phase],uint32_t(i+1),name.c_str(),
+                        static_cast<unsigned long long>(totals.second),
+                        totals.second?totals.first/double(totals.second):0.);
+                }
+                for(uint32_t q=0;q<3;++q){
+                    const auto span=queueSpans[phase][q],work=queueWork[phase][q];
+                    LogEvent(0,"sweep.gpu_queue",
+                        "phase=%s queue=%s frames=%llu avg_span_ms=%.3f avg_work_ms=%.3f",
+                        phases[phase],queueNames[q],
+                        static_cast<unsigned long long>(span.second),
+                        span.second?span.first/double(span.second):0.,
+                        work.second?work.first/double(work.second):0.);
+                }
             }
+            LogEvent(0,"sweep.gpu_experiment",
+                "baseline_busiest_queue_ms=%.3f fog_off_busiest_queue_ms=%.3f difference_ms=%.3f",
+                avgBottleneck[0],avgBottleneck[1],avgBottleneck[0]-avgBottleneck[1]);
             LogEvent(0,"sweep.xr",
                 "frames=%llu wait_frame_ms=%.3f begin_frame_ms=%.3f sync_actions_ms=%.3f locate_ms=%.3f acquire_color_ms=%.3f wait_color_ms=%.3f acquire_depth_ms=%.3f wait_depth_ms=%.3f end_frame_ms=%.3f",
                 static_cast<unsigned long long>(diagnosticGpuFrames),
