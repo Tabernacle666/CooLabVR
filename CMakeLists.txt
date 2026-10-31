@@ -230,19 +230,45 @@ add_custom_target(LaboVRShaders DEPENDS ${SHADER_OUTPUTS})
 # Pipeline cache identity is intentionally independent from release labels and world source.
 # It changes only when host GPU pipeline inputs change.
 set(LAB_ABI_INPUT "LaboVR-PipelineABI16-Visual1-Scene3-SM66-RS11-CUDA120-Agility6196-DXC1.9-Zpr-O3-MSAA${LAB_MSAA_SAMPLES}-NVCC${CMAKE_CUDA_COMPILER_VERSION}-${CMAKE_CXX_COMPILER_ID}${CMAKE_CXX_COMPILER_VERSION}")
-file(GLOB_RECURSE LAB_ABI_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.cu"
-    "${CMAKE_CURRENT_SOURCE_DIR}/labs/labovr/*.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/labs/labovr/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/*.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/*.hpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.hlsl"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.hlsli"
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.cmake"
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.in"
+# Pipeline cache invalidation must follow GPU pipeline inputs only.
+# Hashing all *.cpp/*.h made an ordinary physics/logging edit reconfigure
+# CMake (including PhysX FetchContent), regenerate BuildConfig.h and rebuild
+# the renderer. Keep the PSO cache conservative for renderer/ABI changes,
+# while allowing true incremental builds for world, physics and logging edits.
+set(LAB_ABI_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/Graphics.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/Graphics.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/GpuRayScene.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/GpuRayScene.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/GpuSceneCache.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/GpuSceneCache.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/GpuMemory.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/GpuMemory.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/ConsoleSpec.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/GpuPublication.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/TerminalDomain.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/AtmosphereDomain.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/OpticalDomain.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/labs/labovr/VisualDomain.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/labs/labovr/VisualDomain.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/labs/labovr/ClientLayers.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/labs/labovr/ClientLayers.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/labs/labovr/ContentVisuals.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/LaboVRAtmosphere.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/LaboVRCapture.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/LaboVRGpuInteropService.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/LaboVRGpuService.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/LaboVROptical.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/LaboVRRendering.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/LaboVRTerminal.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/LaboVRVisual.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cartridge_api/LaboVRVisualService.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PhysXSm120.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
+file(GLOB_RECURSE LAB_ABI_SHADER_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.hlsl"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.hlsli")
+list(APPEND LAB_ABI_SOURCES ${LAB_ABI_SHADER_SOURCES})
 list(SORT LAB_ABI_SOURCES)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${LAB_ABI_SOURCES})
 foreach(source IN LISTS LAB_ABI_SOURCES)
