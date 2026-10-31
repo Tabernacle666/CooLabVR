@@ -197,3 +197,17 @@ corps dynamiques, les joints et l'état de mise en veille. Surveiller le
 comportement de la suspension et du ventilateur ; rétablir 12/4 si
 l'amélioration est absente ou si la stabilité physique diminue.
 Sept lignes `physics.profile.*` sont requises dans le manifeste.
+
+
+### Detail des attentes PhysX par sous-pas
+
+`physics.profile.wait` inclut les temps d'appel CPU de `fetchResults` separes
+entre le premier sous-pas de chaque frame (`first_*`) et les sous-pas suivants
+(`later_*`). Les compteurs `fetch_lt_0_5ms` a `fetch_ge_4ms` forment une
+distribution de tous les appels. `check_avg_ms` mesure l'appel CPU a
+`checkResults(false)` ; une reponse non prete indique uniquement que le
+resultat n'etait pas pret a cet instant. Le temps dans `fetchResults` peut
+inclure du travail GPU et de la synchronisation et ne mesure pas un noyau
+PhysX isole. Les sous-pas suivants sont regroupes, meme si la configuration
+actuelle en autorise au plus deux par frame. Ces mesures sont agregees sans
+synchronisation GPU supplementaire et n'ajoutent pas de ligne de profil.
