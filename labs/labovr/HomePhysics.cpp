@@ -224,10 +224,6 @@ void HomePhysics::Build(SceneData& assets){
     }
     buildingGroup_=7;
     auto tree=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_SPHERE,{potOrigin.x,1.225f,potOrigin.z},{.030f,0,0},.0007f,RoomLayer);
-    // A newly tracked kinematic hand can overlap this very light root ball and
-    // launch it. Grabbing uses the D6 drive and does not need hand contact;
-    // keep ordinary contacts with the vase, rocks, table, and floor.
-    tree.collisionMask&=~HandLayer;
     tree.staticFriction=.85f;tree.angularDamping=.30f;
     auto bonsai=Body(tree);bonsaiBody_=bonsai;entities_.back().id="vase-bonsai";entities_.back().name="Bonsai tree";
     Visual(bonsai,uint32_t(Mesh::Sphere),Material::Bark,{.060f,.060f,.060f});
