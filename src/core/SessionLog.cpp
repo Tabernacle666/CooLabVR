@@ -43,6 +43,7 @@ DWORD WINAPI Run(void*) {
 }
 bool SessionLogEnabled() noexcept{return enabled.load(std::memory_order_relaxed);}
 void SetSessionLogCompact(bool compact) noexcept{compactMode.store(compact,std::memory_order_relaxed);}
+bool SessionLogCompact() noexcept{return compactMode.load(std::memory_order_relaxed);}
 bool KeepCompactStage(const char* stage) noexcept{
     // No per-frame string formatting, queuing or disk writes in the sweep.
     return !std::strncmp(stage,"sweep.",6)||!std::strncmp(stage,"capture.",8)||

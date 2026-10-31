@@ -66,3 +66,20 @@ l'adaptateur, la resolution de rendu et la VRAM utilisee/disponible.
 **Important :** `submit_avg_ms` mesure le temps CPU dans la fonction de
 rendu et non le temps d'execution GPU. Aucun query GPU par frame n'est ajoute.
 L'option `-GpuValidation` reste facultative et peut influencer les performances.
+
+
+## Profil physique compact
+
+Au moment de la fermeture, trois lignes `physics.profile.*` sont écrites une
+seule fois et recopiées dans `manifest.json > performance_physics` :
+
+- `physics.profile.cpu` : pas fixes, saturation des sous-pas, temps CPU moyen et
+  maximal par pas, temps CPU par frame et temps d'acquisition du verrou CUDA.
+- `physics.profile.wait` : appels `fetchResults` bloquants, sommes des temps
+  d'attente PhysX, des commandes et des changements de topologie.
+- `physics.profile.submit` : temps CPU par pas pour la soumission PhysX,
+  la population CUDA et les lectures d'état après la simulation.
+
+Ce ne sont pas des durées d'exécution GPU. Les valeurs sont agrégées en mémoire
+et n'ajoutent aucune requête GPU ni synchronisation. La télémétrie capture le
+coût CPU des opérations existantes, sans enregistrer les frames une par une.

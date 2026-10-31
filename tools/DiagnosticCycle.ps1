@@ -87,6 +87,7 @@ try {
     $summary = $null
     $cpuMetrics = $null
     $gpuMetrics = $null
+    $physicsProfile = @()
     if(Test-Path -LiteralPath $gameLog -PathType Leaf) {
         $lines = @(Get-Content -LiteralPath $gameLog -ErrorAction SilentlyContinue)
         $captureEvents = @($lines | Where-Object { $_ -match 'sweep\.capture\.saved' })
@@ -96,6 +97,7 @@ try {
         $gpuLines = @($lines | Where-Object { $_ -match '\tsweep\.gpu\t' } | Select-Object -Last 1)
         if($cpuLines.Count) { $cpuMetrics = [string]$cpuLines[0] }
         if($gpuLines.Count) { $gpuMetrics = [string]$gpuLines[0] }
+        $physicsProfile = @($lines | Where-Object { $_ -match '\tphysics\.profile\.' })
         $lines | Where-Object { $_ -match 'sweep\.(start|view|capture|summary|timeout)' } |
             Set-Content -LiteralPath (Join-Path $runDir 'capture_index.txt') -Encoding UTF8
     }
@@ -151,6 +153,7 @@ try {
         performance_summary = $summary
         performance_cpu = $cpuMetrics
         performance_gpu = $gpuMetrics
+        performance_physics = @($physicsProfile)
         errors = @($errors.ToArray())
         complete = $complete
     }

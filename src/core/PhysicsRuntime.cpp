@@ -137,6 +137,13 @@ struct PhysicsRuntime::Impl {
         uint64_t publicationBackpressureCount{};
         double frameCommandWaitMs{},frameFetchBlockingMs{},frameTopologyWaitMs{};
         uint32_t frameUntimedSteps{};
+        // Compact diagnostic, counters only; no GPU queries, waits or per-frame files.
+        struct DiagnosticProfile {
+            uint64_t frames{},steps{},fetchBlocked{},cappedFrames{};
+            double frameCpuMs{},stepCpuMs{},maxStepCpuMs{},contextLockMs{};
+            double commandWaitMs{},fetchBlockedMs{},fetchReadyMs{},topologyWaitMs{};
+            double simulateSubmitMs{},populationSubmitMs{},postFetchCpuMs{};
+        } diagnostic;
         LabGpuPublicationProviderV1 provider{};std::vector<LabU32> streamMaterials;
         Scene(Impl& r,Owner& o,LabPhysicsSceneV1 h,const LabPhysicsSceneDescV1& d):runtime(r),owner(o),handle(h),desc(d){}
         void Initialize();void Destroy();
@@ -207,6 +214,21 @@ void PhysicsRuntime::Impl::Scene::DestroyPublications(){
     for(auto& s:slots){s.instances.Destroy(owner.interop);s.control.Destroy(owner.interop);s.lighting.Destroy(owner.interop);s.producer.Destroy(owner.interop);s.consumer.Destroy(owner.interop);s.refs.clear();s.value=s.leaseGeneration=0;}
 }
 void PhysicsRuntime::Impl::Scene::Destroy(){
+    if(SessionLogCompact()&&diagnostic.frames){
+        const auto& p=diagnostic;
+        const double invFrames=1./double(p.frames),invSteps=p.steps?1./double(p.steps):0.;
+        LogEvent(0,"physics.profile.cpu",
+            "frames=%llu steps=%llu steps_per_frame=%.3f capped_frames=%llu dropped_s=%.6f frame_avg_ms=%.3f step_avg_ms=%.3f step_peak_ms=%.3f lock_avg_ms=%.3f",
+            static_cast<unsigned long long>(p.frames),static_cast<unsigned long long>(p.steps),
+            double(p.steps)*invFrames,static_cast<unsigned long long>(p.cappedFrames),
+            droppedSeconds,p.frameCpuMs*invFrames,p.stepCpuMs*invSteps,p.maxStepCpuMs,p.contextLockMs*invFrames);
+        LogEvent(0,"physics.profile.wait",
+            "fetch_blocked_steps=%llu fetch_blocked_total_ms=%.3f fetch_ready_total_ms=%.3f command_wait_total_ms=%.3f topology_wait_total_ms=%.3f",
+            static_cast<unsigned long long>(p.fetchBlocked),p.fetchBlockedMs,p.fetchReadyMs,p.commandWaitMs,p.topologyWaitMs);
+        LogEvent(0,"physics.profile.submit",
+            "simulate_avg_ms=%.3f population_avg_ms=%.3f post_fetch_avg_ms=%.3f",
+            p.simulateSubmitMs*invSteps,p.populationSubmitMs*invSteps,p.postFetchCpuMs*invSteps);
+    }
     {PxScopedCudaLock lock(*runtime.cuda);DestroyPublications();Cuda(cudaStreamSynchronize(stream),"retire physics scene");
     cudaFreeHost(forceHost);cudaFreeHost(torqueHost);cudaFreeHost(editPoseHost);cudaFreeHost(editIndexHost);cudaFree(editPoseDevice);cudaFree(editIndexDevice);cudaFree(editZeroDevice);
     if(insects)cudaFree(insects);cudaFree(populationBodies);if(populationBodyPoses)cudaFree(populationBodyPoses);if(populationGrid)cudaFree(populationGrid);cudaFree(populationSummary);for(auto& r:populationReadbacks){cudaFreeHost(r.host);cudaEventDestroy(r.done);}
@@ -354,7 +376,7 @@ void PhysicsRuntime::Impl::Scene::CollectTimings(){
     collect(timings,"physics.gpu");collect(stepTimings,"physics.step.gpu");collect(publicationTimings,"physics.publication.wait");
 }
 void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
-    const double stepBegin=QpcNowSeconds();double commandWaitMs=0,topologyWaitMs=0,uploadSubmitMs=0;
+    const double stepBegin=QpcNowSeconds();double commandWaitMs=0,topologyWaitMs=0,uploadSubmitMs=0,populationSubmitMs=0;
     auto* timing=BeginTiming(stepTimings,stepTimingCursor,tick+1);
     if(!timing)++frameUntimedSteps;
     const bool rebuild=topologyDirty;
@@ -367,7 +389,9 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
         double uploadBegin=QpcNowSeconds();
         Cuda(cudaMemcpyAsync(forces,forceHost,dynamicCount*sizeof(PxVec3),cudaMemcpyHostToDevice,stream),"upload grouped forces");Cuda(cudaMemcpyAsync(torques,torqueHost,dynamicCount*sizeof(PxVec3),cudaMemcpyHostToDevice,stream),"upload grouped torques");
         uploadSubmitMs=(QpcNowSeconds()-uploadBegin)*1000;
+        const double populationBegin=SessionLogCompact()?QpcNowSeconds():0.;
         StepPopulation();
+        if(populationBegin>0)populationSubmitMs+=(QpcNowSeconds()-populationBegin)*1000.;
         PhysicsApplyAirflow(stream,dragDevice,uint32_t(dragHost.size()),airflowDevice,uint32_t(airflowHost.size()),current,velocity,angular,forces,torques,float(simulationTime));Cuda(cudaGetLastError(),"rotor airflow forces");
         PhysicsApplyAero(stream,aeroDevice,uint32_t(aeroHost.size()),current,velocity,angular,forces,torques);Cuda(cudaGetLastError(),"wing aerodynamic commands");
         Driver(cuEventRecord(forceReady,reinterpret_cast<CUstream>(stream)),"publish grouped commands");auto& api=scene->getDirectGPUAPI();
@@ -389,7 +413,11 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
         double waitBegin=QpcNowSeconds();Cuda(cudaStreamSynchronize(stream),"prepare scene topology");
         topologyWaitMs=(QpcNowSeconds()-waitBegin)*1000;
     }
-    if(started&&!rebuild&&!dynamicCount)StepPopulation();
+    if(started&&!rebuild&&!dynamicCount){
+        const double populationBegin=SessionLogCompact()?QpcNowSeconds():0.;
+        StepPopulation();
+        if(populationBegin>0)populationSubmitMs+=(QpcNowSeconds()-populationBegin)*1000.;
+    }
     for(auto& c:commands)if(c.kind==LAB_PHYSICS_KINEMATIC_TARGET){auto* b=FindBody(c.body);if(b&&b->kinematic){auto end=P(c.target);PxQuat q=end.q;if(b->lastTarget.q.dot(q)<0)q=-q;PxTransform target(b->lastTarget.p+(end.p-b->lastTarget.p)*targetFraction,(b->lastTarget.q*(1-targetFraction)+q*targetFraction).getNormalized());static_cast<PxRigidDynamic*>(b->actor)->setKinematicTarget(target);}}
     for(auto& j:joints)if(j.joint&&j.motor.structSize){
         auto target=P(j.motor.target);auto omega=V(j.motor.angularVelocity);
@@ -413,10 +441,21 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction){
     // request the blocking path when checkResults already establishes readiness.
     Gpu(scene->fetchResults(!resultsReady,&error)&&error==0,"PhysX GPU simulation failed; no CPU fallback allowed");
     double fetchMs=(QpcNowSeconds()-fetchBegin)*1000;runtime.Check();
+    const double postFetchBegin=SessionLogCompact()?QpcNowSeconds():0.;
     if(rebuild)RefreshIndices();if(descriptorsDirty)RefreshDescriptors();ReadState(!started||rebuild);started=true;++tick;simulationTime+=desc.fixedStepSeconds;
+    const double postFetchMs=postFetchBegin>0?(QpcNowSeconds()-postFetchBegin)*1000.:0.;
     if(timing)Cuda(cudaEventRecord(timing->end,stream),"end physical fixed-step GPU span");
     frameCommandWaitMs+=commandWaitMs;frameFetchBlockingMs+=resultsReady?0:fetchMs;frameTopologyWaitMs+=topologyWaitMs;
-    LogEvent(frame,"physics.step","scene=%llu tick=%llu cpu_ms=%.4f command_upload_submit_ms=%.4f command_wait_ms=%.4f topology_wait_ms=%.4f simulate_submit_ms=%.4f fetch_ms=%.4f fetch_blocking=%u gpu_timed=%u",static_cast<unsigned long long>(handle),static_cast<unsigned long long>(tick),(QpcNowSeconds()-stepBegin)*1000,uploadSubmitMs,commandWaitMs,topologyWaitMs,simulateMs,fetchMs,unsigned(!resultsReady),unsigned(timing!=nullptr));
+    const double stepCpuMs=(QpcNowSeconds()-stepBegin)*1000.;
+    if(SessionLogCompact()){
+        auto& p=diagnostic;
+        ++p.steps;p.stepCpuMs+=stepCpuMs;p.maxStepCpuMs=std::max(p.maxStepCpuMs,stepCpuMs);
+        p.commandWaitMs+=commandWaitMs;p.topologyWaitMs+=topologyWaitMs;
+        p.fetchBlocked+=!resultsReady;
+        if(resultsReady)p.fetchReadyMs+=fetchMs;else p.fetchBlockedMs+=fetchMs;
+        p.simulateSubmitMs+=simulateMs;p.populationSubmitMs+=populationSubmitMs;p.postFetchCpuMs+=postFetchMs;
+    }
+    LogEvent(frame,"physics.step","scene=%llu tick=%llu cpu_ms=%.4f command_upload_submit_ms=%.4f command_wait_ms=%.4f topology_wait_ms=%.4f simulate_submit_ms=%.4f fetch_ms=%.4f fetch_blocking=%u gpu_timed=%u",static_cast<unsigned long long>(handle),static_cast<unsigned long long>(tick),stepCpuMs,uploadSubmitMs,commandWaitMs,topologyWaitMs,simulateMs,fetchMs,unsigned(!resultsReady),unsigned(timing!=nullptr));
     if(started&&!rebuild)std::erase_if(commands,[](const auto& c){return c.kind==LAB_PHYSICS_IMPULSE||c.kind==LAB_PHYSICS_ANGULAR_IMPULSE;});
 }
 void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
@@ -443,7 +482,12 @@ void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
     // a display frame that had no physics tick.
     if(steps){for(const auto& c:commands)if(c.kind==LAB_PHYSICS_KINEMATIC_TARGET){if(auto* b=FindBody(c.body))b->lastTarget=P(c.target);}}
     if(steps)std::erase_if(commands,[](const auto& c){return c.kind!=LAB_PHYSICS_IMPULSE&&c.kind!=LAB_PHYSICS_ANGULAR_IMPULSE;});
-    LogEvent(frame,"physics.frame","scene=%llu tick=%llu steps=%u fixed_dt=%.8f cpu_ms=%.4f context_lock_ms=%.4f command_wait_ms=%.4f fetch_blocking_call_ms=%.4f topology_wait_ms=%.4f untimed_gpu_steps=%u frame_gpu_timed=%u publication_backpressure_total=%llu dropped_seconds=%.6f probe_count=%u readback_bytes=%u",static_cast<unsigned long long>(handle),static_cast<unsigned long long>(tick),steps,desc.fixedStepSeconds,(QpcNowSeconds()-begin)*1000,contextLockMs,frameCommandWaitMs,frameFetchBlockingMs,frameTopologyWaitMs,frameUntimedSteps,unsigned(timing!=nullptr),static_cast<unsigned long long>(publicationBackpressureCount),droppedSeconds,uint32_t(probeHost.size()),uint32_t(probeHost.size()*sizeof(LabPhysicsStateV1)+sizeof(uint32_t)));
+    const double frameCpuMs=(QpcNowSeconds()-begin)*1000.;
+    if(SessionLogCompact()){
+        ++diagnostic.frames;diagnostic.cappedFrames+=steps==desc.maxSubsteps;
+        diagnostic.frameCpuMs+=frameCpuMs;diagnostic.contextLockMs+=contextLockMs;
+    }
+    LogEvent(frame,"physics.frame","scene=%llu tick=%llu steps=%u fixed_dt=%.8f cpu_ms=%.4f context_lock_ms=%.4f command_wait_ms=%.4f fetch_blocking_call_ms=%.4f topology_wait_ms=%.4f untimed_gpu_steps=%u frame_gpu_timed=%u publication_backpressure_total=%llu dropped_seconds=%.6f probe_count=%u readback_bytes=%u",static_cast<unsigned long long>(handle),static_cast<unsigned long long>(tick),steps,desc.fixedStepSeconds,frameCpuMs,contextLockMs,frameCommandWaitMs,frameFetchBlockingMs,frameTopologyWaitMs,frameUntimedSteps,unsigned(timing!=nullptr),static_cast<unsigned long long>(publicationBackpressureCount),droppedSeconds,uint32_t(probeHost.size()),uint32_t(probeHost.size()*sizeof(LabPhysicsStateV1)+sizeof(uint32_t)));
 }
 uint32_t PhysicsRuntime::Impl::Scene::SetVisuals(const LabPhysicsVisualV1* v,uint32_t n,const LabPhysicsLightV1* l,uint32_t nl){
     if(n>MaxVisuals||nl>MaxLights||(n&&!v)||(nl&&!l))return 0;
