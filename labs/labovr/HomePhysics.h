@@ -65,7 +65,7 @@ class HomePhysics {
     LabPhysicsLightV1 lampLight_{};
     float lampPower_{26};
     uint64_t trackingRevision_{},sourceFrame_{};
-    double lastUpdateSeconds_{},stateSeconds_{},diagnosticMechanismAt_{},handTraceUntilSeconds_{},handTraceNextSeconds_{};
+    double lastUpdateSeconds_{},stateSeconds_{},diagnosticMechanismAt_{};
     bool visible_{true},pullArmed_{true};
     struct HandSettings {
         float positionTau{.018f},rotationTau{.024f},maxSpeed{7.f},maxAngularSpeed{20.f};

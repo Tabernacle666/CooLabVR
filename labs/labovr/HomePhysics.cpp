@@ -65,14 +65,14 @@ void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
     for(const auto& e:entities_)if(e.shape.kind==LAB_PHYSICS_DYNAMIC&&std::find(probes.begin(),probes.end(),e.body)==probes.end())probes.push_back(e.body);
     Require(physics_->SetProbes(physics_->serviceContext,scene_,probes.data(),uint32_t(probes.size())),"Home physics_v1: behavior/audio probes rejected");
     provider_.structSize=sizeof(provider_);Require(physics_->GetVisualProvider(physics_->serviceContext,scene_,&provider_),"Home physics_v1: GPU visual provider unavailable");Require(gpu_->SetPublicationProvider(gpu_->serviceContext,&provider_),"Home gpu_v1: physical visual provider rejected");
-    lastUpdateSeconds_=handTraceUntilSeconds_=handTraceNextSeconds_=0;trackingRevision_=sourceFrame_=0;stateSeconds_=0;population_={};population_.structSize=sizeof(population_);population_.targetId=Invalid;states_={};visible_=true;pullArmed_=true;frozen_=false;selection_=0;simulationSeconds_=0;fanActualRpm_=0;
+    lastUpdateSeconds_=0;trackingRevision_=sourceFrame_=0;stateSeconds_=0;population_={};population_.structSize=sizeof(population_);population_.targetId=Invalid;states_={};visible_=true;pullArmed_=true;frozen_=false;selection_=0;simulationSeconds_=0;fanActualRpm_=0;
     panelPose_={{0,1.875f,3.96f},{0,0,0,1}};panelTheme_=panelFace_=0;panelSelected_=false;
     SyncTouchSources();BuildSelections();if(!ReadProfile(LAB_PROFILE_USER_V1,true)){auto userStatus=status_;if(ReadProfile(LAB_PROFILE_SYSTEM_V1,true)&&userStatus!="READY")status_="USER: "+userStatus+" / SYSTEM LOADED";}PublishRendering();PublishAcoustics();
 }
 void HomePhysics::Unload(){
     if(!scene_)return;auto opticalOff=optical_;opticalOff.enabled=0;gpu_->SetPopulationOpticalSettings(gpu_->serviceContext,&opticalOff);audio_->SetAcousticBoxes(audio_->serviceContext,nullptr,0);auto off=fog_;off.enabled=0;Require(gpu_->SetFogSettings(gpu_->serviceContext,&off),"Home gpu_v1: volume detach rejected");Require(gpu_->SetPublicationProvider(gpu_->serviceContext,nullptr),"Home gpu_v1: detach failed");
     LabAudioEmitterBatchV1 silence{1,sizeof(silence),0,nullptr,0,0};Require(audio_->PublishEmitters(audio_->serviceContext,&silence),"Home audio_v1: emitter detach failed");Require(physics_->DestroyScene(physics_->serviceContext,scene_),"Home physics_v1: scene destruction failed");
-    entities_.clear();connections_.clear();selections_.clear();scene_=0;fanBodies_={};fanCcd_=false;vaseBase_=bonsaiBody_=0;rockBodies_={};hands_={};grips_={};handTracked_={};handColliding_={};handBlocked_={};handPlacedFrame_={};handTraceUntilSeconds_=handTraceNextSeconds_=0;provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
+    entities_.clear();connections_.clear();selections_.clear();scene_=0;fanBodies_={};fanCcd_=false;vaseBase_=bonsaiBody_=0;rockBodies_={};hands_={};grips_={};handTracked_={};handColliding_={};handBlocked_={};handPlacedFrame_={};provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
 }
 void HomePhysics::SetVisible(bool visible){
     visible_=visible;PublishAcoustics();PublishOptical();
@@ -377,7 +377,7 @@ void HomePhysics::UpdateHands(const LabInputSnapshotV1& input,double dt,bool res
             }handTracked_[hand]=tracked;continue;
         }
         if(!tracked){
-            if(handTracked_[hand]){LogEvent(sourceFrame_,"home.hand","hand=%u tracking=lost proxy=%llu",hand,static_cast<unsigned long long>(hands_[hand]));handTraceUntilSeconds_=lastUpdateSeconds_+3.;handTraceNextSeconds_=0;}
+            if(handTracked_[hand])LogEvent(sourceFrame_,"home.hand","hand=%u tracking=lost proxy=%llu",hand,static_cast<unsigned long long>(hands_[hand]));
             ReleaseHand(hand);handTracked_[hand]=false;handBlocked_[hand]=true;
             if(handColliding_[hand]){Require(physics_->SetBodyCollisionEnabled(physics_->serviceContext,scene_,hands_[hand],0),"Home physics_v1: untracked hand collision disable rejected");handColliding_[hand]=false;}
             continue;
@@ -391,7 +391,6 @@ void HomePhysics::UpdateHands(const LabInputSnapshotV1& input,double dt,bool res
         if(!handTracked_[hand]){
             handTargets_[hand]=raw;handPlacedFrame_[hand]=sourceFrame_;
             LogEvent(sourceFrame_,"home.hand","hand=%u tracking=acquired proxy=%llu xyz=%.4f,%.4f,%.4f reset=%u jumped=%u source_frame=%llu",hand,static_cast<unsigned long long>(hands_[hand]),raw.position.x,raw.position.y,raw.position.z,unsigned(reset),unsigned(jumped),static_cast<unsigned long long>(sourceFrame_));
-            handTraceUntilSeconds_=lastUpdateSeconds_+3.;handTraceNextSeconds_=0;
         }
         else{
             auto& target=handTargets_[hand];XMFLOAT3 delta=Sub(V(raw.position),V(target.position));float distance=Length(delta);
@@ -481,17 +480,23 @@ void HomePhysics::Update(uint64_t frame,double now,std::span<const SceneLight> a
     }
     bool sampled=sourceFrame_&&sourceFrame_<=frame&&frame-sourceFrame_<6;
     UpdateHands(input,dt,trackingReset,sampled,commands);
-    if(fresh&&now<=handTraceUntilSeconds_&&now>=handTraceNextSeconds_){
-        handTraceNextSeconds_=now+.2;
+    // Record every new PhysX snapshot, including before the first controller
+    // appears and after all controllers have lost tracking.
+    if(fresh&&SessionLogEnabled()){
         auto tree=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==bonsaiBody_;});
         auto vase=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==vaseBase_;});
         if(tree!=states_.begin()+stateCount_&&vase!=states_.begin()+stateCount_){
             auto p=V(tree->pose.position);
-            LogEvent(frame,"home.tree_trace","source_frame=%llu tree_xyz=%.4f,%.4f,%.4f tree_v=%.4f,%.4f,%.4f tree_contacts=%u tree_contact_body=%llu tree_impulse=%.4f vase_xyz=%.4f,%.4f,%.4f left_xyz=%.4f,%.4f,%.4f left_distance=%.4f left_tracked=%u left_collision=%u right_xyz=%.4f,%.4f,%.4f right_distance=%.4f right_tracked=%u right_collision=%u",
-                static_cast<unsigned long long>(sourceFrame_),p.x,p.y,p.z,tree->linearVelocity.x,tree->linearVelocity.y,tree->linearVelocity.z,tree->contactCount,static_cast<unsigned long long>(tree->contactBody),tree->normalImpulse,
+            LogEvent(frame,"home.tree_trace","source_frame=%llu tree_xyz=%.4f,%.4f,%.4f tree_q=%.4f,%.4f,%.4f,%.4f tree_v=%.4f,%.4f,%.4f tree_w=%.4f,%.4f,%.4f tree_contacts=%u tree_contact_body=%llu tree_impulse=%.4f vase_xyz=%.4f,%.4f,%.4f vase_q=%.4f,%.4f,%.4f,%.4f left_xyz=%.4f,%.4f,%.4f left_distance=%.4f left_tracked=%u left_collision=%u left_grip=%u right_xyz=%.4f,%.4f,%.4f right_distance=%.4f right_tracked=%u right_collision=%u right_grip=%u",
+                static_cast<unsigned long long>(sourceFrame_),p.x,p.y,p.z,
+                tree->pose.orientation.x,tree->pose.orientation.y,tree->pose.orientation.z,tree->pose.orientation.w,
+                tree->linearVelocity.x,tree->linearVelocity.y,tree->linearVelocity.z,
+                tree->angularVelocity.x,tree->angularVelocity.y,tree->angularVelocity.z,
+                tree->contactCount,static_cast<unsigned long long>(tree->contactBody),tree->normalImpulse,
                 vase->pose.position.x,vase->pose.position.y,vase->pose.position.z,
+                vase->pose.orientation.x,vase->pose.orientation.y,vase->pose.orientation.z,vase->pose.orientation.w,
                 handTargets_[0].position.x,handTargets_[0].position.y,handTargets_[0].position.z,Length(Sub(V(handTargets_[0].position),p)),unsigned(handTracked_[0]),unsigned(handColliding_[0]),
-                handTargets_[1].position.x,handTargets_[1].position.y,handTargets_[1].position.z,Length(Sub(V(handTargets_[1].position),p)),unsigned(handTracked_[1]),unsigned(handColliding_[1]));
+                unsigned(grips_[0]!=0),handTargets_[1].position.x,handTargets_[1].position.y,handTargets_[1].position.z,Length(Sub(V(handTargets_[1].position),p)),unsigned(handTracked_[1]),unsigned(handColliding_[1]),unsigned(grips_[1]!=0));
         }
     }
     if(fresh&&visible_&&!frozen_&&states_[1].body==socket_&&states_[2].body==pullSlider_){

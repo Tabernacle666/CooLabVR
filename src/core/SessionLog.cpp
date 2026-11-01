@@ -45,7 +45,7 @@ bool SessionLogEnabled() noexcept{return enabled.load(std::memory_order_relaxed)
 void SetSessionLogCompact(bool compact) noexcept{compactMode.store(compact,std::memory_order_relaxed);}
 bool SessionLogCompact() noexcept{return compactMode.load(std::memory_order_relaxed);}
 bool KeepCompactStage(const char* stage) noexcept{
-    // No per-frame string formatting, queuing or disk writes in the sweep.
+    // Keep the physical state trace through the entire diagnostic session.
     return !std::strncmp(stage,"sweep.",6)||!std::strncmp(stage,"capture.",8)||
         !std::strncmp(stage,"physics.profile.",16)||
         !std::strncmp(stage,"startup.",8)||!std::strncmp(stage,"session.",8)||
