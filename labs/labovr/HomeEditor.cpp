@@ -59,7 +59,7 @@ void HomePhysics::RotatePanel(float sign){if(!frozen_){status_="FREEZE BEFORE RO
 bool HomePhysics::SetFrozen(bool value){
     if(value==frozen_)return true;
     if(value)for(uint32_t h=0;h<2;h++){
-        ReleaseHand(h);
+        ReleaseHand(h,false);
         if(hands_[h]&&handColliding_[h]){if(!physics_->SetBodyCollisionEnabled(physics_->serviceContext,scene_,hands_[h],0))Fail("Home physics_v1: frozen hand collision disable rejected");handColliding_[h]=false;}
     }
     if(!physics_->SetPaused(physics_->serviceContext,scene_,value?1u:0u)){
@@ -72,7 +72,7 @@ bool HomePhysics::SetFrozen(bool value){
     // Keep the existing kinematic proxies and GPU identities across resume.
     // Grabbing stays blocked until the grip is released; tracking will update
     // their targets through the ordinary physics_v1 command path.
-    if(!value){handTracked_={};PublishAcoustics();}
+    if(!value)PublishAcoustics();
     if(value&&!RefreshEditor())return false;if(value)CacheValidSelections();status_=value?"FROZEN - EDIT ACTIVE":"RUNNING";return true;
 }
 void HomePhysics::Select(int direction){if(selections_.empty())return;selection_=uint32_t((int(selection_)+direction+int(selections_.size()))%int(selections_.size()));status_="SELECTED";}

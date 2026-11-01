@@ -45,11 +45,11 @@ bool SessionLogEnabled() noexcept{return enabled.load(std::memory_order_relaxed)
 void SetSessionLogCompact(bool compact) noexcept{compactMode.store(compact,std::memory_order_relaxed);}
 bool SessionLogCompact() noexcept{return compactMode.load(std::memory_order_relaxed);}
 bool KeepCompactStage(const char* stage) noexcept{
-    // Keep the physical state trace through the entire diagnostic session.
+    // No per-frame string formatting, queuing or disk writes in the sweep.
     return !std::strncmp(stage,"sweep.",6)||!std::strncmp(stage,"capture.",8)||
         !std::strncmp(stage,"physics.profile.",16)||
         !std::strncmp(stage,"startup.",8)||!std::strncmp(stage,"session.",8)||
-        !std::strncmp(stage,"plugin.transition",17)||!std::strncmp(stage,"home.lamp",9)||!std::strncmp(stage,"home.mechanisms",15)||!std::strncmp(stage,"home.vase",9)||!std::strncmp(stage,"home.hand",9)||!std::strncmp(stage,"home.tree_trace",15)||
+        !std::strncmp(stage,"plugin.transition",17)||!std::strncmp(stage,"home.lamp",9)||!std::strncmp(stage,"home.mechanisms",15)||!std::strncmp(stage,"home.vase",9)||
         !std::strncmp(stage,"gpu.managed_refused",19)||
         std::strstr(stage,"error")||std::strstr(stage,"warning")||
         std::strstr(stage,"fatal");

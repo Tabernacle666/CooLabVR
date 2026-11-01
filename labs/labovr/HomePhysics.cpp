@@ -52,34 +52,25 @@ void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
     Require(input_->ResolveAction(input_->serviceContext,"interaction.grab",&grabAction_),"Home input_v1: grab action unavailable");
     sweepTracked_={};sweepVelocity_={};sweeps_={sizeof(sweeps_)};populationCount_=1;if(nextFlyAudioId_>=0x01000000u||nextFanAudioId_>0x00fffffcu)Fail("Home audio identity space exhausted");
     flyAudioIds_={nextFlyAudioId_++};fanAudioBase_=nextFanAudioId_;nextFanAudioId_+=3;populationInput_={sizeof(LabPopulationInputV1),1};lampPower_=26;Build(assets);
-    // Reserve tracked-hand bodies before PhysX initializes its Direct GPU indices.
-    // Tracking changes only their targets and collision masks, not scene topology.
-    hands_={};grips_={};handTracked_={};handColliding_={};handBlocked_={};handPlacedFrame_={};
-    for(uint32_t hand=0;hand<2;++hand){
-        auto d=Description(LAB_PHYSICS_KINEMATIC,LAB_PHYSICS_BOX,{hand?3.5f:-3.5f,1.5f,3.5f},{.038f,.020f,.071f},1,HandLayer);
-        d.shapePose.position={0,0,.026f};d.collisionMask=RoomLayer|ChainLayer|InsectLayer;
-        hands_[hand]=Body(d);entities_.pop_back();
-        Require(physics_->SetBodyCollisionEnabled(physics_->serviceContext,scene_,hands_[hand],0),"Home physics_v1: parked hand collision disable rejected");
-    }
     std::vector<LabPhysicsBodyV1> probes{bulb_,socket_,pullSlider_,pullHandle_,fanRotor_};
     for(const auto& e:entities_)if(e.shape.kind==LAB_PHYSICS_DYNAMIC&&std::find(probes.begin(),probes.end(),e.body)==probes.end())probes.push_back(e.body);
     Require(physics_->SetProbes(physics_->serviceContext,scene_,probes.data(),uint32_t(probes.size())),"Home physics_v1: behavior/audio probes rejected");
     provider_.structSize=sizeof(provider_);Require(physics_->GetVisualProvider(physics_->serviceContext,scene_,&provider_),"Home physics_v1: GPU visual provider unavailable");Require(gpu_->SetPublicationProvider(gpu_->serviceContext,&provider_),"Home gpu_v1: physical visual provider rejected");
-    lastUpdateSeconds_=0;trackingRevision_=sourceFrame_=0;stateSeconds_=0;population_={};population_.structSize=sizeof(population_);population_.targetId=Invalid;states_={};visible_=true;pullArmed_=true;frozen_=false;selection_=0;simulationSeconds_=0;fanActualRpm_=0;
+    lastUpdateSeconds_=0;trackingRevision_=sourceFrame_=0;stateSeconds_=0;population_={};population_.structSize=sizeof(population_);population_.targetId=Invalid;states_={};visible_=true;pullArmed_=true;hands_={};grips_={};handTracked_={};handColliding_={};handBlocked_={};frozen_=false;selection_=0;simulationSeconds_=0;fanActualRpm_=0;
     panelPose_={{0,1.875f,3.96f},{0,0,0,1}};panelTheme_=panelFace_=0;panelSelected_=false;
     SyncTouchSources();BuildSelections();if(!ReadProfile(LAB_PROFILE_USER_V1,true)){auto userStatus=status_;if(ReadProfile(LAB_PROFILE_SYSTEM_V1,true)&&userStatus!="READY")status_="USER: "+userStatus+" / SYSTEM LOADED";}PublishRendering();PublishAcoustics();
 }
 void HomePhysics::Unload(){
     if(!scene_)return;auto opticalOff=optical_;opticalOff.enabled=0;gpu_->SetPopulationOpticalSettings(gpu_->serviceContext,&opticalOff);audio_->SetAcousticBoxes(audio_->serviceContext,nullptr,0);auto off=fog_;off.enabled=0;Require(gpu_->SetFogSettings(gpu_->serviceContext,&off),"Home gpu_v1: volume detach rejected");Require(gpu_->SetPublicationProvider(gpu_->serviceContext,nullptr),"Home gpu_v1: detach failed");
     LabAudioEmitterBatchV1 silence{1,sizeof(silence),0,nullptr,0,0};Require(audio_->PublishEmitters(audio_->serviceContext,&silence),"Home audio_v1: emitter detach failed");Require(physics_->DestroyScene(physics_->serviceContext,scene_),"Home physics_v1: scene destruction failed");
-    entities_.clear();connections_.clear();selections_.clear();scene_=0;fanBodies_={};fanCcd_=false;vaseBase_=bonsaiBody_=0;rockBodies_={};hands_={};grips_={};handTracked_={};handColliding_={};handBlocked_={};handPlacedFrame_={};provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
+    entities_.clear();connections_.clear();selections_.clear();scene_=0;fanBodies_={};fanCcd_=false;vaseBase_=bonsaiBody_=0;rockBodies_={};hands_={};grips_={};handTracked_={};handColliding_={};provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
 }
 void HomePhysics::SetVisible(bool visible){
     visible_=visible;PublishAcoustics();PublishOptical();
     auto volume=fog_;volume.enabled=fog_.enabled&&visible_;Require(gpu_->SetFogSettings(gpu_->serviceContext,&volume),"Home gpu_v1: volume visibility rejected");if(!scene_)return;
     Require(physics_->SetVisible(physics_->serviceContext,scene_,visible?1u:0u),"Home physics_v1: visibility update failed");
     if(!visible)for(uint32_t hand=0;hand<2;hand++){
-        ReleaseHand(hand);handBlocked_[hand]=true;
+        ReleaseHand(hand,false);handBlocked_[hand]=true;
         if(hands_[hand]&&handColliding_[hand]){Require(physics_->SetBodyCollisionEnabled(physics_->serviceContext,scene_,hands_[hand],0),"Home physics_v1: hidden hand collision disable rejected");handColliding_[hand]=false;}
     }
 }
@@ -340,8 +331,9 @@ PoseActionState HomePhysics::HandState(uint32_t hand)const noexcept{
     const auto& p=handTargets_[hand&1u];PoseActionState out;
     out.pose={{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}};out.tracked=handTracked_[hand&1u];return out;
 }
-void HomePhysics::ReleaseHand(uint32_t hand){
+void HomePhysics::ReleaseHand(uint32_t hand,bool destroy){
     if(grips_[hand]){Require(physics_->DestroyJoint(physics_->serviceContext,scene_,grips_[hand]),"Home physics_v1: grip release rejected");grips_[hand]=0;}
+    if(destroy&&hands_[hand]){Require(physics_->DestroyBody(physics_->serviceContext,scene_,hands_[hand]),"Home physics_v1: hand proxy detach rejected");hands_[hand]=0;handColliding_[hand]=false;}
 }
 void HomePhysics::UpdateHands(const LabInputSnapshotV1& input,double dt,bool reset,bool sampled,std::vector<LabPhysicsCommandV1>& commands){
     auto sample=[&](LabInputActionHandleV1 action,uint32_t hand)->const LabInputSampleV1*{for(uint32_t i=0;i<input.sampleCount;i++)if(input.samples[i].controlId==action&&input.samples[i].sourceId==hand)return &input.samples[i];return nullptr;};
@@ -376,22 +368,14 @@ void HomePhysics::UpdateHands(const LabInputSnapshotV1& input,double dt,bool res
                     auto& q=handTargets_[hand].orientation;XMFLOAT4 filtered;XMStoreFloat4(&filtered,XMQuaternionSlerp(XMVectorSet(q.x,q.y,q.z,q.w),XMVectorSet(raw.orientation.x,raw.orientation.y,raw.orientation.z,raw.orientation.w),blend));q={filtered.x,filtered.y,filtered.z,filtered.w};}
             }handTracked_[hand]=tracked;continue;
         }
-        if(!tracked){
-            if(handTracked_[hand])LogEvent(sourceFrame_,"home.hand","hand=%u tracking=lost proxy=%llu",hand,static_cast<unsigned long long>(hands_[hand]));
-            ReleaseHand(hand);handTracked_[hand]=false;handBlocked_[hand]=true;
-            if(handColliding_[hand]){Require(physics_->SetBodyCollisionEnabled(physics_->serviceContext,scene_,hands_[hand],0),"Home physics_v1: untracked hand collision disable rejected");handColliding_[hand]=false;}
-            continue;
-        }
+        if(!tracked){ReleaseHand(hand,true);handTracked_[hand]=false;handBlocked_[hand]=true;continue;}
         LabPoseV1 raw{{pose->position[0],pose->position[1],pose->position[2]},{pose->orientation[0],pose->orientation[1],pose->orientation[2],pose->orientation[3]}};
         bool jumped=handTracked_[hand]&&Length(Sub(V(raw.position),V(handTargets_[hand].position)))>.45f;
-        if(reset||jumped){ReleaseHand(hand);handTracked_[hand]=false;handBlocked_[hand]=true;}
+        if(reset||jumped){ReleaseHand(hand,true);handTracked_[hand]=false;handBlocked_[hand]=true;}
         // Capacitive rest surfaces may remain touched throughout normal use.
         // Rearm grab on grip release; touching must not lock physical hands out.
         if(!grabbing)handBlocked_[hand]=false;
-        if(!handTracked_[hand]){
-            handTargets_[hand]=raw;handPlacedFrame_[hand]=sourceFrame_;
-            LogEvent(sourceFrame_,"home.hand","hand=%u tracking=acquired proxy=%llu xyz=%.4f,%.4f,%.4f reset=%u jumped=%u source_frame=%llu",hand,static_cast<unsigned long long>(hands_[hand]),raw.position.x,raw.position.y,raw.position.z,unsigned(reset),unsigned(jumped),static_cast<unsigned long long>(sourceFrame_));
-        }
+        if(!handTracked_[hand])handTargets_[hand]=raw;
         else{
             auto& target=handTargets_[hand];XMFLOAT3 delta=Sub(V(raw.position),V(target.position));float distance=Length(delta);
             float positionBlend=handSettings_.positionTau>0?1.f-std::exp(-float(dt)/handSettings_.positionTau):1.f;
@@ -405,16 +389,18 @@ void HomePhysics::UpdateHands(const LabInputSnapshotV1& input,double dt,bool res
         }
         handTracked_[hand]=true;
         bool canInteract=visible_&&!handBlocked_[hand];
-        // The parked proxy must reach its first tracked pose in a completed
-        // simulation step before its collider or grip can touch the scene.
-        bool placed=sourceFrame_>handPlacedFrame_[hand];
-        bool enabled=visible_&&touching&&!reset&&!jumped&&placed;
-        if(!canInteract||!grabbing)ReleaseHand(hand);
+        bool enabled=visible_&&touching&&!reset&&!jumped;
+        if(!canInteract||!grabbing)ReleaseHand(hand,false);
+        if(!hands_[hand]){
+            auto d=Description(LAB_PHYSICS_KINEMATIC,LAB_PHYSICS_BOX,V(handTargets_[hand].position),{.038f,.020f,.071f},1,HandLayer);
+            d.pose=handTargets_[hand];d.shapePose.position={0,0,.026f};d.collisionMask=RoomLayer|ChainLayer|InsectLayer;d.contactOffset=.002f;
+            hands_[hand]=Body(d);entities_.pop_back();handColliding_[hand]=true;
+        }
         if(handColliding_[hand]!=enabled){Require(physics_->SetBodyCollisionEnabled(physics_->serviceContext,scene_,hands_[hand],enabled?1u:0u),"Home physics_v1: hand collision toggle rejected");handColliding_[hand]=enabled;}
         // Both hands can independently attach to any dynamic physical shape.
         // Choose the nearest collider surface, not its center (important for
         // large table tops and for gripping a chain link where it is touched).
-        if(canInteract&&grabbing&&placed&&!grips_[hand]&&sampled){
+        if(canInteract&&grabbing&&!grips_[hand]&&sampled){
             const auto& h=handTargets_[hand];Pose handPose{V(h.position),{h.orientation.x,h.orientation.y,h.orientation.z,h.orientation.w}};
             const XMFLOAT3 handPoint=Transform({0,0,.026f},handPose);float best=handSettings_.grabRadius;
             LabPhysicsBodyV1 selected{};XMFLOAT3 selectedWorld{},selectedLocal{};
@@ -480,25 +466,6 @@ void HomePhysics::Update(uint64_t frame,double now,std::span<const SceneLight> a
     }
     bool sampled=sourceFrame_&&sourceFrame_<=frame&&frame-sourceFrame_<6;
     UpdateHands(input,dt,trackingReset,sampled,commands);
-    // Record every new PhysX snapshot, including before the first controller
-    // appears and after all controllers have lost tracking.
-    if(fresh&&SessionLogEnabled()){
-        auto tree=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==bonsaiBody_;});
-        auto vase=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==vaseBase_;});
-        if(tree!=states_.begin()+stateCount_&&vase!=states_.begin()+stateCount_){
-            auto p=V(tree->pose.position);
-            LogEvent(frame,"home.tree_trace","source_frame=%llu tree_xyz=%.4f,%.4f,%.4f tree_q=%.4f,%.4f,%.4f,%.4f tree_v=%.4f,%.4f,%.4f tree_w=%.4f,%.4f,%.4f tree_contacts=%u tree_contact_body=%llu tree_impulse=%.4f vase_xyz=%.4f,%.4f,%.4f vase_q=%.4f,%.4f,%.4f,%.4f left_xyz=%.4f,%.4f,%.4f left_distance=%.4f left_tracked=%u left_collision=%u left_grip=%u right_xyz=%.4f,%.4f,%.4f right_distance=%.4f right_tracked=%u right_collision=%u right_grip=%u",
-                static_cast<unsigned long long>(sourceFrame_),p.x,p.y,p.z,
-                tree->pose.orientation.x,tree->pose.orientation.y,tree->pose.orientation.z,tree->pose.orientation.w,
-                tree->linearVelocity.x,tree->linearVelocity.y,tree->linearVelocity.z,
-                tree->angularVelocity.x,tree->angularVelocity.y,tree->angularVelocity.z,
-                tree->contactCount,static_cast<unsigned long long>(tree->contactBody),tree->normalImpulse,
-                vase->pose.position.x,vase->pose.position.y,vase->pose.position.z,
-                vase->pose.orientation.x,vase->pose.orientation.y,vase->pose.orientation.z,vase->pose.orientation.w,
-                handTargets_[0].position.x,handTargets_[0].position.y,handTargets_[0].position.z,Length(Sub(V(handTargets_[0].position),p)),unsigned(handTracked_[0]),unsigned(handColliding_[0]),
-                unsigned(grips_[0]!=0),handTargets_[1].position.x,handTargets_[1].position.y,handTargets_[1].position.z,Length(Sub(V(handTargets_[1].position),p)),unsigned(handTracked_[1]),unsigned(handColliding_[1]),unsigned(grips_[1]!=0));
-        }
-    }
     if(fresh&&visible_&&!frozen_&&states_[1].body==socket_&&states_[2].body==pullSlider_){
         // Measure the physical slider in the socket's frame: moving or swinging
         // the whole lamp cannot impersonate a pull of its switch chain.

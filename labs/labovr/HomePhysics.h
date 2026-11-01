@@ -58,7 +58,6 @@ class HomePhysics {
     std::array<LabPhysicsJointV1,2> grips_{};
     std::array<LabPoseV1,2> handTargets_{};
     std::array<bool,2> handTracked_{},handColliding_{},handBlocked_{};
-    std::array<uint64_t,2> handPlacedFrame_{};
     std::array<LabPhysicsStateV1,LABOVR_PHYSICS_MAX_PROBES_V1> states_{};uint32_t stateCount_{};
     LabInputActionHandleV1 handPose_{},physicalAction_{},grabAction_{};
     LabGpuPublicationProviderV1 provider_{};
@@ -76,7 +75,7 @@ class HomePhysics {
     LabPhysicsJointV1 Joint(const LabPhysicsD6DescV1&);
     void Visual(LabPhysicsBodyV1,uint32_t,Material,XMFLOAT3,LabPoseV1={{0,0,0},{0,0,0,1}},uint32_t=DynamicObject);
     void Build(SceneData&);
-    void ReleaseHand(uint32_t);
+    void ReleaseHand(uint32_t,bool);
     void UpdateHands(const LabInputSnapshotV1&,double,bool,bool,std::vector<LabPhysicsCommandV1>&);
     LabFlightSettingsV1 flight_{sizeof(LabFlightSettingsV1),0x76a019abu,1.4f,3.8f,.22f,1.5f,.24f,1.2f,.16f,.75f,.7f,.8f,.08f,8.f,2.5f,.000018f,.000030f,1.5f,.15f,180.f,.0035f,.25f,1.2f};
     LabPopulationEffectsV1 effects_{sizeof(LabPopulationEffectsV1),0,.18f,1.f,12.f,1.3f,.55f,.7f,.35f};
