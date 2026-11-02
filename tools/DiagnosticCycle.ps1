@@ -187,6 +187,7 @@ try {
     $gpuTiming = @()
     $gpuExperiment = $null
     $continuity = $null
+    $mutation = $null
     $gpuPasses = @()
     $gpuQueues = @()
     if(Test-Path -LiteralPath $gameLog -PathType Leaf) {
@@ -205,6 +206,8 @@ try {
         $xrRows = @($lines | Where-Object { $_ -match '\tsweep\.xr\t' } | Select-Object -Last 1)
         $continuityRows = @($lines | Where-Object { $_ -match '\tsweep\.population_continuity\t' } | Select-Object -Last 1)
         if($continuityRows.Count) { $continuity = [string]$continuityRows[0] }
+        $mutationRows = @($lines | Where-Object { $_ -match '\tsweep\.physics_mutation\t' } | Select-Object -Last 1)
+        if($mutationRows.Count) { $mutation = [string]$mutationRows[0] }
         $gpuTimingRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_timing\t' })
         $gpuExperimentRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_experiment\t' } | Select-Object -Last 1)
         if($xrRows.Count) { $xrProfile = [string]$xrRows[0] }
@@ -265,6 +268,10 @@ try {
         $errors.Add('Hidden population continuity was not verified')
         Note 'ERROR: hidden population continuity was not verified'
     }
+    if(($null -ne $gameExit) -and (-not $mutation -or $mutation -notmatch 'result=pass\b')) {
+        $errors.Add('Physics mutation invariant was not verified')
+        Note 'ERROR: physics mutation invariant was not verified'
+    }
     if($gameExit -eq 0) {
         $requiredProfiles = @('cpu','wait','submit','motor','solver','transfer','gpu')
         $missingProfiles = @($requiredProfiles | Where-Object {
@@ -305,6 +312,7 @@ try {
         performance_cpu = $cpuMetrics
         performance_gpu = $gpuMetrics
         population_continuity = $continuity
+        physics_mutation = $mutation
         performance_physics = @($physicsProfile)
         performance_xr = $xrProfile
         performance_gpu_timing = @($gpuTiming)

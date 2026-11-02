@@ -89,6 +89,84 @@ public:
     GpuPublication Acquire()override{return host_.AcquireGpuPublication();}
     void Release(const GpuPublication& publication)override{host_.ReleaseGpuPublication(publication);}
 };
+class DiagnosticMutation {
+    const LabPhysicsServiceV1* api_{};
+    LabPhysicsSceneV1 scene_{};
+    LabPhysicsBodyV1 witness_{},added_{},replacement_{};
+    unsigned stage_{};
+    uint64_t changedFrame_{};
+    double started_{};
+    float velocity_{};
+    const char* reason_{"not_started"};
+    LabPhysicsBodyDescV1 Body(float x) const {
+        LabPhysicsBodyDescV1 d{};d.structSize=sizeof(d);d.kind=LAB_PHYSICS_DYNAMIC;
+        d.shape=LAB_PHYSICS_BOX;d.layer=1;d.collisionMask=0;
+        d.pose.position={x,0,0};d.pose.orientation={0,0,0,1};
+        d.shapePose.orientation={0,0,0,1};d.dimensions={.05f,.05f,.05f};
+        d.mass=1;d.staticFriction=.6f;d.dynamicFriction=.4f;
+        d.contactOffset=.002f;d.maxAngularVelocity=100;return d;
+    }
+    bool Probes(LabPhysicsBodyV1 a,LabPhysicsBodyV1 b=0){
+        LabPhysicsBodyV1 bodies[]{a,b};
+        return api_->SetProbes(api_->serviceContext,scene_,bodies,b?2u:1u)!=0;
+    }
+    int Error(const char* reason){reason_=reason;return -1;}
+public:
+    bool Start(const LabHostApiV1& host){
+        started_=QpcNowSeconds();
+        api_=static_cast<const LabPhysicsServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_PHYSICS_V1,1));
+        if(!api_){reason_="service";return false;}
+        // One substep per frame ensures the force crosses the rebuild boundary.
+        LabPhysicsSceneDescV1 desc{sizeof(desc),8,{0,0,0},1.f/120.f,1,0};
+        if(!api_->CreateScene(api_->serviceContext,&desc,&scene_)){reason_="scene";return false;}
+        auto body=Body(0);
+        if(!api_->CreateBody(api_->serviceContext,scene_,&body,&witness_)||!Probes(witness_)){
+            reason_="initial_body";return false;
+        }
+        stage_=1;reason_="waiting_initial";return true;
+    }
+    int Update(uint64_t frame){
+        if(QpcNowSeconds()-started_>8.)return Error("timeout");
+        LabPhysicsStateV1 states[4]{};
+        LabPhysicsSnapshotV1 snapshot{sizeof(snapshot),4,states};
+        if(!api_->PollSnapshot(api_->serviceContext,scene_,&snapshot))return 0;
+        const LabPhysicsStateV1* witness{};bool addedSeen=false,replacementSeen=false;
+        for(uint32_t i=0;i<snapshot.stateCount;i++){
+            if(states[i].body==witness_)witness=&states[i];
+            if(states[i].body==added_)addedSeen=true;
+            if(states[i].body==replacement_)replacementSeen=true;
+        }
+        if(!witness)return 0;
+        if(stage_==1){
+            auto body=Body(2);
+            if(!api_->CreateBody(api_->serviceContext,scene_,&body,&added_)||!Probes(witness_,added_))
+                return Error("add_body");
+            LabPhysicsCommandV1 force{};force.structSize=sizeof(force);force.kind=LAB_PHYSICS_FORCE;
+            force.body=witness_;force.value={120,0,0};force.target.orientation={0,0,0,1};
+            if(!api_->SubmitCommands(api_->serviceContext,scene_,&force,1))return Error("submit_force");
+            changedFrame_=frame;stage_=2;reason_="waiting_force";return 0;
+        }
+        if(stage_==2&&snapshot.sourceFrame>changedFrame_&&addedSeen&&witness->linearVelocity.x>.1f){
+            velocity_=witness->linearVelocity.x;
+            if(!Probes(witness_)||!api_->DestroyBody(api_->serviceContext,scene_,added_))return Error("destroy_body");
+            LabPhysicsCommandV1 stale{};stale.structSize=sizeof(stale);stale.kind=LAB_PHYSICS_FORCE;
+            stale.body=added_;stale.value={1,0,0};stale.target.orientation={0,0,0,1};
+            if(api_->SubmitCommands(api_->serviceContext,scene_,&stale,1))return Error("stale_handle_accepted");
+            auto body=Body(2);
+            if(!api_->CreateBody(api_->serviceContext,scene_,&body,&replacement_)||replacement_==added_||!Probes(witness_,replacement_))
+                return Error("recreate_body");
+            changedFrame_=frame;stage_=3;reason_="waiting_replacement";return 0;
+        }
+        if(stage_==3&&snapshot.sourceFrame>changedFrame_&&replacementSeen&&!addedSeen&&
+           std::isfinite(witness->linearVelocity.x)&&witness->linearVelocity.x>.1f){
+            reason_="ok";return 1;
+        }
+        return 0;
+    }
+    const char* Reason()const{return reason_;}
+    float Velocity()const{return velocity_;}
+    void Close(){if(scene_){api_->DestroyScene(api_->serviceContext,scene_);scene_=0;}}
+};
 int RenderThread(Channels& io,const RunOptions& options) {
     wchar_t threadName[96];swprintf_s(threadName,L"%ls render",GetCoreIdentity().diagnosticLabelW);SetThreadDescription(GetCurrentThread(),threadName);ComScope com;JobSystem jobs;jobs.Start();
     const auto inputConfiguration=AssetPath(L"input.ini");
@@ -125,6 +203,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
     uint64_t diagnosticGpuFrames=0,diagnosticFogOffFirstFrame=0;
     PopulationContinuityCheck diagnosticContinuity;
     bool diagnosticHiddenActive=false,diagnosticContinuityPassed=false;
+    DiagnosticMutation diagnosticMutation;bool diagnosticMutationActive=false,diagnosticMutationPassed=false;
     uint64_t diagnosticHiddenFirstFrame=0;
     double diagnosticHiddenStarted=0.;
     StageCpu xrWaitCpu,xrBeginCpu,xrSyncCpu,xrLocateCpu,xrAcquireColorCpu,
@@ -191,6 +270,17 @@ int RenderThread(Channels& io,const RunOptions& options) {
             const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
             home.Update(frame.input,now,attractive);
             if(options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished)homeCpu.Add((QpcNowSeconds()-begin)*1000.);
+        }
+        if(diagnosticMutationActive){
+            const int result=diagnosticMutation.Update(frame.input.frameId);
+            if(result){
+                diagnosticMutationPassed=result>0;
+                LogEvent(frame.input.frameId,"sweep.physics_mutation","result=%s reason=%s force_velocity_x=%.5f",
+                    result>0?"pass":"fail",diagnosticMutation.Reason(),diagnosticMutation.Velocity());
+                diagnosticMutation.Close();diagnosticMutationActive=false;
+                if(result<0)diagnosticFailed=true;
+                io.stop=true;
+            }
         }
         HomeCommand command=home.ConsumeCommand();
         if(command.kind==HomeCommandKind::NewSession){activeWorldId="home";activeWorldName="Home";menuVisible=true;activeWorldRetainsHomeAmbient=true;home.SetMenuVisible(true);pluginHost.SetInputCaptured(false);worlds.UnloadActive();activePlugin.reset();activeModule.reset();pluginHost.ClearWorldServices();clientInput.SetNavigationOptions(true,true);graphics.WaitIdle();worlds.ResetPersistent(home);home.SetAmbientVisible(true);presentation.Set(home.Contributions());SceneData scene=home.Scene();graphics.WaitIdle();graphics.ReplaceScene(scene,presentation.Contributions());audio.LoadScene(scene);}
@@ -365,7 +455,12 @@ int RenderThread(Channels& io,const RunOptions& options) {
                     static_cast<unsigned long long>(diagnosticContinuity.BaselineFrame()),
                     static_cast<unsigned long long>(sample.sourceFrame),diagnosticContinuity.Witness(),
                     diagnosticContinuity.Distance(),static_cast<unsigned long long>(diagnosticContinuity.Comparisons()));
-                home.SetAmbientVisible(true);diagnosticHiddenActive=false;io.stop=true;
+                home.SetAmbientVisible(true);diagnosticHiddenActive=false;
+                diagnosticMutationActive=diagnosticMutation.Start(homeApi);
+                if(!diagnosticMutationActive){
+                    LogEvent(frame.input.frameId,"sweep.physics_mutation","result=fail reason=%s",diagnosticMutation.Reason());
+                    diagnosticMutation.Close();diagnosticFailed=true;io.stop=true;
+                }
             }else if(QpcNowSeconds()-diagnosticHiddenStarted>=3.){
                 const char* result=diagnosticContinuity.Comparisons()?"fail":"inconclusive";
                 LogEvent(frame.input.frameId,"sweep.population_continuity",
@@ -378,6 +473,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
     }
     io.stop=true;
     if(diagnosticHiddenActive){home.SetAmbientVisible(true);diagnosticHiddenActive=false;}
+    diagnosticMutation.Close();
     if(diagnosticGpuActive){
         graphics.EndPerformanceCapture();
         xr.SetPerformanceCaptureActive(false);
@@ -485,7 +581,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 xrAcquireColorCpu.Average(),xrWaitColorCpu.Average(),xrAcquireDepthCpu.Average(),
                 xrWaitDepthCpu.Average(),xrEndCpu.Average());
         }
-        if(diagnosticFailed||!diagnosticContinuityPassed||diagnosticSlot!=diagnosticViews.size())return 3;
+        if(diagnosticFailed||!diagnosticContinuityPassed||!diagnosticMutationPassed||diagnosticSlot!=diagnosticViews.size())return 3;
     }
     return options.gpuValidation&&!clean?2:0;
 }
