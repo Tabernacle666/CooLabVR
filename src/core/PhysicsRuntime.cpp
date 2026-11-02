@@ -119,6 +119,7 @@ struct PhysicsRuntime::Impl {
         PxU32 matterWetPhase{},matterDryPhase{};
         LabPhysicsMatterDescV1 matterDesc{};
         float* matterMoisture{},*matterNextMoisture{},*matterTemperature{},*matterExposure{};
+        uint32_t* matterPhaseChangedDevice{},*matterPhaseChangedHost{};
         MatterVaporField matterVapor{};
         float matterWaterMass{};
         uint32_t matterSide{};
@@ -168,13 +169,14 @@ struct PhysicsRuntime::Impl {
             uint64_t frames{},steps{},fetchBlocked{},droppedFrames{};
             uint64_t deviceZeroSteps{},hostUploadSteps{};
             uint64_t gpuStepSamples{},gpuFrameSamples{},untimedGpuSteps{};
-            uint64_t motorWrites{},motorUnchangedSkips{};
+            uint64_t motorWrites{},motorUnchangedSkips{},matterPhaseUpdates{};
             uint64_t fetchByOrdinal[2]{}, fetchBuckets[5]{};
             double fetchSumByOrdinalMs[2]{}, fetchPeakByOrdinalMs[2]{}, checkResultsMs{};
             double gpuStepSumMs{},gpuStepPeakMs{},gpuFrameSumMs{},gpuFramePeakMs{};
             double frameCpuMs{},stepCpuMs{},maxStepCpuMs{},contextLockMs{};
             double commandWaitMs{},fetchBlockedMs{},fetchReadyMs{},topologyWaitMs{};
             double simulateSubmitMs{},populationSubmitMs{},postFetchCpuMs{},forceInitSubmitMs{};
+            double matterPhaseSyncMs{},matterParticleFetchMs{};
         } diagnostic;
         LabGpuPublicationProviderV1 provider{};std::vector<LabU32> streamMaterials;
         Scene(Impl& r,Owner& o,LabPhysicsSceneV1 h,const LabPhysicsSceneDescV1& d):runtime(r),owner(o),handle(h),desc(d){}
@@ -275,6 +277,10 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
             "position_iterations=%u velocity_iterations=%u dynamic_bodies=%u joint_count=%u sleeping_disabled=%u",
             unsigned(SolverPositionIterations),unsigned(SolverVelocityIterations),dynamicCount,
             activeJoints,unsigned(scene->getFlags().isSet(PxSceneFlag::eDISABLE_SLEEPING)));
+        LogEvent(0,"physics.profile.matter",
+            "active_particles=%u phase_update_steps=%llu phase_sync_total_ms=%.3f particle_fetch_total_ms=%.3f particle_fetch_avg_step_ms=%.4f",
+            matterDesc.particleCount,static_cast<unsigned long long>(p.matterPhaseUpdates),
+            p.matterPhaseSyncMs,p.matterParticleFetchMs,p.matterParticleFetchMs*invSteps);
         const uint64_t forceSteps=p.deviceZeroSteps+p.hostUploadSteps;
         LogEvent(0,"physics.profile.transfer",
             "device_zero_steps=%llu host_upload_steps=%llu active_force_steps=%llu force_init_submit_avg_ms=%.4f",
@@ -289,6 +295,8 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
     if(matterNextMoisture)cudaFree(matterNextMoisture);
     if(matterTemperature)cudaFree(matterTemperature);
     if(matterExposure)cudaFree(matterExposure);
+    if(matterPhaseChangedDevice)cudaFree(matterPhaseChangedDevice);
+    if(matterPhaseChangedHost)cudaFreeHost(matterPhaseChangedHost);
     if(matterVapor.density)cudaFree(matterVapor.density);
     if(matterVapor.next)cudaFree(matterVapor.next);
     if(matterVapor.sources)cudaFree(matterVapor.sources);
@@ -583,7 +591,18 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal
     }
     // PBD phases and particle buffers are shared with CUDA. Explicitly retire
     // field writes before PhysX consumes them; no unsynchronized device race.
-    if(matterSystem)Cuda(cudaStreamSynchronize(stream),"retire PBD CUDA writes before PhysX simulation");
+    double matterPhaseSyncMs=0.;
+    if(matterSystem){
+        const double phaseBegin=QpcNowSeconds();
+        Cuda(cudaStreamSynchronize(stream),"retire PBD CUDA writes before PhysX simulation");
+        matterPhaseSyncMs=(QpcNowSeconds()-phaseBegin)*1000.;
+        // Pinned readback is completed by the same required CUDA rendezvous.
+        // Never invalidate/rebuild the PBD phase map if every phase is unchanged.
+        if(*matterPhaseChangedHost){
+            matterBuffer->raiseFlags(PxParticleBufferFlag::eUPDATE_PHASE);
+            if(SessionLogCompact())++diagnostic.matterPhaseUpdates;
+        }
+    }
     double simulateBegin=QpcNowSeconds();scene->simulate(desc.fixedStepSeconds);
     double simulateMs=(QpcNowSeconds()-simulateBegin)*1000;
     const double checkBegin=SessionLogCompact()?QpcNowSeconds():0.;
@@ -594,7 +613,12 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal
     // or direct-GPU state query. Keep that required rendezvous explicit; do not
     // request the blocking path when checkResults already establishes readiness.
     Gpu(scene->fetchResults(!resultsReady,&error)&&error==0,"PhysX GPU simulation failed; no CPU fallback allowed");
-    if(matterSystem)scene->fetchResultsParticleSystem();
+    double matterParticleFetchMs=0.;
+    if(matterSystem){
+        const double particleBegin=QpcNowSeconds();
+        scene->fetchResultsParticleSystem();
+        matterParticleFetchMs=(QpcNowSeconds()-particleBegin)*1000.;
+    }
     double fetchMs=(QpcNowSeconds()-fetchBegin)*1000;runtime.Check();
     const double postFetchBegin=SessionLogCompact()?QpcNowSeconds():0.;
     if(rebuild)RefreshIndices();if(descriptorsDirty)RefreshDescriptors();ReadState(!started||rebuild);
@@ -605,10 +629,10 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal
             matterSide,matterDesc.radius,matterWaterMass,matterVapor,
             matterWetPhase,matterDryPhase,lightDevice,uint32_t(lightHost.size()),
             current,airflowDevice,uint32_t(airflowHost.size()),angular,
-            desc.fixedStepSeconds,float(simulationTime));
+            desc.fixedStepSeconds,float(simulationTime),
+            matterPhaseChangedDevice,matterPhaseChangedHost);
         Cuda(cudaGetLastError(),"evolve GPU PBD humidity and advected vapor");
         std::swap(matterVapor.density,matterVapor.next);
-        matterBuffer->raiseFlags(PxParticleBufferFlag::eUPDATE_PHASE);
     }
     started=true;++tick;simulationTime+=desc.fixedStepSeconds;
     const double postFetchMs=postFetchBegin>0?(QpcNowSeconds()-postFetchBegin)*1000.:0.;
@@ -627,6 +651,7 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal
         p.checkResultsMs+=checkMs;
         if(resultsReady)p.fetchReadyMs+=fetchMs;else p.fetchBlockedMs+=fetchMs;
         p.simulateSubmitMs+=simulateMs;p.populationSubmitMs+=populationSubmitMs;p.postFetchCpuMs+=postFetchMs;
+        p.matterPhaseSyncMs+=matterPhaseSyncMs;p.matterParticleFetchMs+=matterParticleFetchMs;
         p.deviceZeroSteps+=forceDeviceCleared;
         p.hostUploadSteps+=forceHostUploaded;
         p.untimedGpuSteps+=timing==nullptr;
@@ -963,6 +988,10 @@ uint32_t PhysicsRuntime::Impl::Scene::ConfigureMatter(const LabPhysicsMatterDesc
     if(!matterBuffer)Fail("PhysX GPU PBD particle buffer allocation failed");
     Allocate(matterMoisture,d.particleCount);Allocate(matterNextMoisture,d.particleCount);
     Allocate(matterTemperature,d.particleCount);Allocate(matterExposure,d.particleCount);
+    Allocate(matterPhaseChangedDevice,1);
+    Cuda(cudaHostAlloc(reinterpret_cast<void**>(&matterPhaseChangedHost),
+        sizeof(uint32_t),cudaHostAllocDefault),"allocate pinned PBD phase transition flag");
+    *matterPhaseChangedHost=0;
     const float mass=d.density*(4.f/3.f)*PxPi*d.radius*d.radius*d.radius;
     matterWaterMass=mass*.5f; // material water fraction, in kg per fully hydrated particle
     matterVapor.dimension=64;

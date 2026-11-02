@@ -54,7 +54,7 @@ __global__ void Environment(const PxVec4* positions,const PxVec4* velocities,
     float radius,float waterMass,MatterVaporField vapor,
     PxU32 wetPhase,PxU32 dryPhase,const PhysicsLightGpu* lights,uint32_t lightCount,
     const PxTransform* poses,const PhysicsAirflowGpu* airflows,uint32_t airflowCount,
-    const PxVec3* angular,float dt,float time) {
+    const PxVec3* angular,float dt,float time,uint32_t* phaseChanged) {
     const uint32_t i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=count)return;
     const PxVec4 pos=positions[i];
@@ -103,7 +103,11 @@ __global__ void Environment(const PxVec4* positions,const PxVec4* velocities,
     w-=loss;
     temperature[i]=t-3.f*loss;
     nextMoisture[i]=w;
-    phases[i]=w>.28f?wetPhase:dryPhase; // dry phase is the stiff, non-fluid crust
+    const PxU32 updatedPhase=w>.28f?wetPhase:dryPhase;
+    if(phases[i]!=updatedPhase){
+        phases[i]=updatedPhase;
+        atomicExch(phaseChanged,1u);
+    } // GPU PBD phases are dirtied by actual material transitions only
     // Every water decrement creates physical vapor mass in the CUDA grid.
     if(loss>0.f){
         const int gx=int(floorf((p.x-vapor.origin.x)/vapor.cellSize));
@@ -173,16 +177,19 @@ void MatterEvolve(cudaStream_t stream,const PxVec4* p,const PxVec4* v,
     float* exposure,uint32_t n,uint32_t side,float radius,float waterMass,
     MatterVaporField vapor,PxU32 wet,PxU32 dry,const PhysicsLightGpu* lights,
     uint32_t lightCount,const PxTransform* poses,const PhysicsAirflowGpu* airflows,
-    uint32_t airflowCount,const PxVec3* angular,float dt,float time){
+    uint32_t airflowCount,const PxVec3* angular,float dt,float time,
+    uint32_t* phaseChangedDevice,uint32_t* phaseChangedHost){
     if(!n)return;
+    cudaMemsetAsync(phaseChangedDevice,0,sizeof(uint32_t),stream);
     cudaMemsetAsync(vapor.sources,0,vapor.dimension*vapor.dimension*vapor.dimension*sizeof(float),stream);
     Environment<<<(n+255)/256,256,0,stream>>>(p,v,phases,moisture,nextMoisture,
         temperature,exposure,n,side,radius,waterMass,vapor,wet,dry,lights,
-        lightCount,poses,airflows,airflowCount,angular,dt,time);
+        lightCount,poses,airflows,airflowCount,angular,dt,time,phaseChangedDevice);
     const uint32_t cells=vapor.dimension*vapor.dimension*vapor.dimension;
     TransportVapor<<<(cells+255)/256,256,0,stream>>>(vapor,airflows,
         airflowCount,poses,angular,dt,time);
     cudaMemcpyAsync(moisture,nextMoisture,n*sizeof(float),cudaMemcpyDeviceToDevice,stream);
+    cudaMemcpyAsync(phaseChangedHost,phaseChangedDevice,sizeof(uint32_t),cudaMemcpyDeviceToHost,stream);
 }
 void MatterPack(cudaStream_t stream,const PxVec4* p,const float* moisture,
     uint32_t n,uint32_t base,float radius,uint32_t mesh,uint32_t material,

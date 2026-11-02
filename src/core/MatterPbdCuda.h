@@ -19,7 +19,8 @@ void MatterEvolve(cudaStream_t stream, const physx::PxVec4* positions,
     MatterVaporField vapor, uint32_t wetPhase, uint32_t dryPhase,
     const PhysicsLightGpu* lights, uint32_t lightCount,
     const physx::PxTransform* poses, const PhysicsAirflowGpu* airflows,
-    uint32_t airflowCount, const physx::PxVec3* angular, float dt, float time);
+    uint32_t airflowCount, const physx::PxVec3* angular, float dt, float time,
+    uint32_t* phaseChangedDevice, uint32_t* phaseChangedHost);
 void MatterPack(cudaStream_t stream, const physx::PxVec4* positions,
     const float* moisture, uint32_t count, uint32_t base, float radius,
     uint32_t mesh, uint32_t material, bool visible, GpuInstance* instances,
