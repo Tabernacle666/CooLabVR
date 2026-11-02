@@ -2,8 +2,8 @@
 #include "PhysicsCuda.h"
 namespace lab {
 struct MatterDiagnosticsGpu {
-    int lower[3]{},upper[3]{};
-    uint32_t wet{},dry{},hot{};
+    int lower[3],upper[3];
+    uint32_t wet,dry,hot;
 };
 struct MatterVaporField {
     float* density{},*next{},*sources{};
