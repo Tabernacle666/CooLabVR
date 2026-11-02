@@ -6,7 +6,8 @@ using namespace physx;
 namespace lab {
 namespace {
 __global__ void Init(PxVec4* positions,PxVec4* velocities,PxU32* phases,
-    float* moisture,float* temperature,float* exposure,uint32_t count,uint32_t side,
+    float* moisture,float* temperature,float* exposure,
+    uint32_t* bondedFaces,uint32_t* brokenFaces,uint32_t count,uint32_t side,
     PxVec3 center,float radius,float invMass,PxU32 phase) {
     const uint32_t i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=count)return;
@@ -24,6 +25,7 @@ __global__ void Init(PxVec4* positions,PxVec4* velocities,PxU32* phases,
     const uint32_t missing=(x==0)+(x+1==side)+(z==0)+(z+1==side)
         +(y==0)+(i+side*side>=count);
     exposure[i]=fminf(1.f,float(missing)/3.f);
+    bondedFaces[i]=0u;brokenFaces[i]=0u;
 }
 __device__ bool MatterContact(const PxVec4* positions,uint32_t a,uint32_t b,float r2) {
     const PxVec4 p=positions[a],q=positions[b];
@@ -51,8 +53,8 @@ __device__ float VaporAt(const float* values,MatterVaporField grid,PxVec3 p) {
 }
 __global__ void Environment(const PxVec4* positions,const PxVec4* velocities,
     PxU32* phases,const float* moisture,float* nextMoisture,
-    float* temperature,float* exposure,uint32_t count,uint32_t side,
-    float radius,float waterMass,MatterVaporField vapor,
+    float* temperature,float* exposure,const uint32_t* brokenFaces,
+    uint32_t count,uint32_t side,float radius,float waterMass,MatterVaporField vapor,
     PxU32 wetPhase,PxU32 dryPhase,const PhysicsLightGpu* lights,uint32_t lightCount,
     const PxTransform* poses,const PhysicsAirflowGpu* airflows,uint32_t airflowCount,
     const PxVec3* angular,float dt,float time,uint32_t* phaseChanged) {
@@ -83,12 +85,15 @@ __global__ void Environment(const PxVec4* positions,const PxVec4* velocities,
     const uint32_t plane=side*side;
     const float contact2=(radius*2.8f)*(radius*2.8f);
     uint32_t contacts=0;float neighborWater=0.f;
-    if(x>0&&MatterContact(positions,i,i-1,contact2)){++contacts;neighborWater+=moisture[i-1];}
-    if(x+1<side&&i+1<count&&MatterContact(positions,i,i+1,contact2)){++contacts;neighborWater+=moisture[i+1];}
-    if(z>0&&MatterContact(positions,i,i-side,contact2)){++contacts;neighborWater+=moisture[i-side];}
-    if(z+1<side&&i+side<count&&MatterContact(positions,i,i+side,contact2)){++contacts;neighborWater+=moisture[i+side];}
-    if(y>0&&MatterContact(positions,i,i-plane,contact2)){++contacts;neighborWater+=moisture[i-plane];}
-    if(i+plane<count&&MatterContact(positions,i,i+plane,contact2)){++contacts;neighborWater+=moisture[i+plane];}
+    // A mechanically fractured bond opens a face even if the separated
+    // particles briefly touch again: the dry shell does not self-heal.
+    const uint32_t fractured=brokenFaces[i];
+    if(x>0&&!(fractured&1u)&&MatterContact(positions,i,i-1,contact2)){++contacts;neighborWater+=moisture[i-1];}
+    if(x+1<side&&i+1<count&&!(fractured&2u)&&MatterContact(positions,i,i+1,contact2)){++contacts;neighborWater+=moisture[i+1];}
+    if(z>0&&!(fractured&4u)&&MatterContact(positions,i,i-side,contact2)){++contacts;neighborWater+=moisture[i-side];}
+    if(z+1<side&&i+side<count&&!(fractured&8u)&&MatterContact(positions,i,i+side,contact2)){++contacts;neighborWater+=moisture[i+side];}
+    if(y>0&&!(fractured&16u)&&MatterContact(positions,i,i-plane,contact2)){++contacts;neighborWater+=moisture[i-plane];}
+    if(i+plane<count&&!(fractured&32u)&&MatterContact(positions,i,i+plane,contact2)){++contacts;neighborWater+=moisture[i+plane];}
     const float exposed=fminf(1.f,float(6-contacts)/3.f);
     // Only newly opened material faces produce an evaporation burst.
     const float opening=fmaxf(0.f,exposed-exposure[i]);
@@ -97,14 +102,14 @@ __global__ void Environment(const PxVec4* positions,const PxVec4* velocities,
     if(contacts)w=fminf(1.f,fmaxf(0.f,w+.18f*dt*(neighborWater/float(contacts)-w)));
     const PxVec4 v=velocities[i];
     const float agitation=sqrtf(v.x*v.x+v.y*v.y+v.z*v.z);
-    const float rate=(.008f+.0008f*fmaxf(0.f,t-20.f))
+    const float rate=(.035f+.0010f*fmaxf(0.f,t-20.f))
         *(1.f+fminf(4.f,speed*.12f)+fminf(2.f,agitation*.08f))
         *exposed*(1.f+10.f*opening);
     const float loss=fminf(w,rate*dt);
     w-=loss;
     temperature[i]=t-3.f*loss;
     nextMoisture[i]=w;
-    const PxU32 updatedPhase=w>.28f?wetPhase:dryPhase;
+    const PxU32 updatedPhase=w>.55f?wetPhase:dryPhase;
     if(phases[i]!=updatedPhase){
         phases[i]=updatedPhase;
         atomicExch(phaseChanged,1u);
@@ -118,6 +123,64 @@ __global__ void Environment(const PxVec4* positions,const PxVec4* velocities,
         if(gx>=0&&gy>=0&&gz>=0&&gx<n&&gy<n&&gz<n)
             atomicAdd(&vapor.sources[VaporIndex(uint32_t(gx),uint32_t(gy),uint32_t(gz),vapor.dimension)],loss*waterMass);
     }
+}
+
+__global__ void CrustForces(const PxVec4* positions,const PxVec4* velocities,
+    const float* moisture,uint32_t* bondedFaces,uint32_t* brokenFaces,
+    PxVec4* nextVelocities,uint32_t count,uint32_t side,float radius,float dt,
+    uint32_t* velocityChanged) {
+    const uint32_t i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=count)return;
+    const uint32_t x=i%side,z=(i/side)%side,y=i/(side*side),plane=side*side;
+    const PxVec4 p=positions[i],v=velocities[i];
+    const float dry=fminf(1.f,fmaxf(0.f,(.72f-moisture[i])/.44f));
+    uint32_t bonded=bondedFaces[i],broken=brokenFaces[i];
+    PxVec3 dv(0.f);
+    if(dry>0.f)for(uint32_t face=0;face<6;face++){
+        const uint32_t bit=1u<<face;
+        if(broken&bit)continue;
+        const bool exists=face==0?x>0:face==1?(x+1<side&&i+1<count):
+            face==2?z>0:face==3?(z+1<side&&i+side<count):
+            face==4?y>0:(i+plane<count);
+        if(!exists)continue;
+        const uint32_t j=face==0?i-1:face==1?i+1:
+            face==2?i-side:face==3?i+side:face==4?i-plane:i+plane;
+        const float neighborDry=fminf(1.f,fmaxf(0.f,(.72f-moisture[j])/.44f));
+        const float shell=fminf(dry,neighborDry);
+        if(shell<=0.f)continue;
+        const PxVec4 q=positions[j];
+        const PxVec3 separation(q.x-p.x,q.y-p.y,q.z-p.z);
+        const float distance=sqrtf(separation.magnitudeSquared());
+        const float rest=radius*2.f;
+        // A spring can form only while actual PhysX particle centers touch.
+        // Broken bonds never reform; no index-driven teleportation or pinning.
+        if(!(bonded&bit)){
+            if(distance>rest*1.16f)continue;
+            bonded|=bit;
+        }
+        // Tensile fracture is caused by deformation of this bond, including
+        // contact impulses from a rigid PhysX tool acting on the particles.
+        if(distance>rest*(1.58f-.24f*shell)){
+            broken|=bit;
+            continue;
+        }
+        if(distance<1.e-7f)continue;
+        const PxVec3 direction=separation/distance;
+        const PxVec4 w=velocities[j];
+        const float relativeSpeed=(PxVec3(w.x-v.x,w.y-v.y,w.z-v.z)).dot(direction);
+        // Explicit damped spring impulse (N*dt/m), only from bonded dry
+        // neighbors. PhysX PBD still owns collision, gravity, and integration.
+        const float acceleration=3800.f*(distance-rest)+8.f*relativeSpeed;
+        dv+=direction*(dt*shell*acceleration);
+    }
+    bondedFaces[i]=bonded;brokenFaces[i]=broken;
+    const float delta2=dv.magnitudeSquared();
+    if(delta2>1.e-16f){
+        const float length=sqrtf(delta2);
+        if(length>.35f)dv*=.35f/length; // stable impulse bound per fixed step
+        atomicExch(velocityChanged,1u);
+    }
+    nextVelocities[i]=PxVec4(v.x+dv.x,v.y+dv.y,v.z+dv.z,v.w);
 }
 __global__ void TransportVapor(MatterVaporField vapor,const PhysicsAirflowGpu* airflows,
     uint32_t airflowCount,const PxTransform* poses,const PxVec3* angular,float dt,float time) {
@@ -149,10 +212,11 @@ __device__ int OrderedFloat(float value) {
 }
 __global__ void ResetProbe(MatterDiagnosticsGpu* out) {
     for(int axis=0;axis<3;axis++){out->lower[axis]=INT_MAX;out->upper[axis]=INT_MIN;}
-    out->wet=out->dry=out->hot=out->tableContacts=out->belowTable=0;
+    out->wet=out->dry=out->hot=out->tableContacts=out->belowTable=out->bondedFaces=out->fracturedFaces=0;
 }
 __global__ void Probe(const PxVec4* positions,const float* moisture,
-    const float* temperature,uint32_t count,const PxTransform* poses,
+    const float* temperature,const uint32_t* bondedFaces,const uint32_t* brokenFaces,
+    uint32_t count,const PxTransform* poses,
     uint32_t tableIndex,PxVec3 halfExtent,float radius,MatterDiagnosticsGpu* out) {
     constexpr uint32_t BlockSize=256;
     const uint32_t lane=threadIdx.x;
@@ -166,8 +230,10 @@ __global__ void Probe(const PxVec4* positions,const float* moisture,
             if(coords[axis]<local.lower[axis])local.lower[axis]=coords[axis];
             if(coords[axis]>local.upper[axis])local.upper[axis]=coords[axis];
         }
-        if(moisture[i]>.28f)++local.wet;else ++local.dry;
+        if(moisture[i]>.55f)++local.wet;else ++local.dry;
         if(temperature[i]>30.f)++local.hot;
+        local.bondedFaces+=__popc(bondedFaces[i]);
+        local.fracturedFaces+=__popc(brokenFaces[i]);
         if(poses&&tableIndex!=0xffffffffu){
             // Contacts are measured against the current oriented GPU box.
             // These counters never exert forces or attach any particle.
@@ -198,6 +264,8 @@ __global__ void Probe(const PxVec4* positions,const float* moisture,
             partial[lane].hot+=other.hot;
             partial[lane].tableContacts+=other.tableContacts;
             partial[lane].belowTable+=other.belowTable;
+            partial[lane].bondedFaces+=other.bondedFaces;
+            partial[lane].fracturedFaces+=other.fracturedFaces;
         }
         __syncthreads();
     }
@@ -211,6 +279,8 @@ __global__ void Probe(const PxVec4* positions,const float* moisture,
         atomicAdd(&out->hot,partial[0].hot);
         atomicAdd(&out->tableContacts,partial[0].tableContacts);
         atomicAdd(&out->belowTable,partial[0].belowTable);
+        atomicAdd(&out->bondedFaces,partial[0].bondedFaces);
+        atomicAdd(&out->fracturedFaces,partial[0].fracturedFaces);
     }
 }
 __global__ void Pack(const PxVec4* positions,const float* moisture,
@@ -238,24 +308,36 @@ __global__ void Pack(const PxVec4* positions,const float* moisture,
 }
 }
 void MatterInitialize(cudaStream_t stream,PxVec4* p,PxVec4* v,PxU32* phases,
-    float* moisture,float* temperature,float* exposure,uint32_t n,uint32_t side,
+    float* moisture,float* temperature,float* exposure,
+    uint32_t* bondedFaces,uint32_t* brokenFaces,uint32_t n,uint32_t side,
     PxVec3 center,float r,float invMass,PxU32 wetPhase){
     if(n)Init<<<(n+255)/256,256,0,stream>>>(p,v,phases,moisture,temperature,
-        exposure,n,side,center,r,invMass,wetPhase);
+        exposure,bondedFaces,brokenFaces,n,side,center,r,invMass,wetPhase);
 }
-void MatterEvolve(cudaStream_t stream,const PxVec4* p,const PxVec4* v,
+void MatterEvolve(cudaStream_t stream,const PxVec4* p,PxVec4* v,
     PxU32* phases,float* moisture,float* nextMoisture,float* temperature,
-    float* exposure,uint32_t n,uint32_t side,float radius,float waterMass,
+    float* exposure,uint32_t* bondedFaces,uint32_t* brokenFaces,
+    PxVec4* nextVelocities,uint32_t n,uint32_t side,float radius,float waterMass,
     MatterVaporField vapor,PxU32 wet,PxU32 dry,const PhysicsLightGpu* lights,
     uint32_t lightCount,const PxTransform* poses,const PhysicsAirflowGpu* airflows,
     uint32_t airflowCount,const PxVec3* angular,float dt,float time,
-    uint32_t* phaseChangedDevice,uint32_t* phaseChangedHost){
+    uint32_t* phaseChangedDevice,uint32_t* phaseChangedHost,
+    uint32_t* velocityChangedDevice,uint32_t* velocityChangedHost){
     if(!n)return;
     cudaMemsetAsync(phaseChangedDevice,0,sizeof(uint32_t),stream);
+    cudaMemsetAsync(velocityChangedDevice,0,sizeof(uint32_t),stream);
     cudaMemsetAsync(vapor.sources,0,vapor.dimension*vapor.dimension*vapor.dimension*sizeof(float),stream);
     Environment<<<(n+255)/256,256,0,stream>>>(p,v,phases,moisture,nextMoisture,
-        temperature,exposure,n,side,radius,waterMass,vapor,wet,dry,lights,
+        temperature,exposure,brokenFaces,n,side,radius,waterMass,vapor,wet,dry,lights,
         lightCount,poses,airflows,airflowCount,angular,dt,time,phaseChangedDevice);
+    // Apply mechanical cohesion only where the local field has formed a dry
+    // shell. The saved rupture mask changes the next humidity/exposure step.
+    CrustForces<<<(n+255)/256,256,0,stream>>>(p,v,nextMoisture,
+        bondedFaces,brokenFaces,nextVelocities,n,side,radius,dt,velocityChangedDevice);
+    cudaMemcpyAsync(v,nextVelocities,n*sizeof(PxVec4),
+        cudaMemcpyDeviceToDevice,stream);
+    cudaMemcpyAsync(velocityChangedHost,velocityChangedDevice,
+        sizeof(uint32_t),cudaMemcpyDeviceToHost,stream);
     const uint32_t cells=vapor.dimension*vapor.dimension*vapor.dimension;
     TransportVapor<<<(cells+255)/256,256,0,stream>>>(vapor,airflows,
         airflowCount,poses,angular,dt,time);
@@ -263,11 +345,13 @@ void MatterEvolve(cudaStream_t stream,const PxVec4* p,const PxVec4* v,
     cudaMemcpyAsync(phaseChangedHost,phaseChangedDevice,sizeof(uint32_t),cudaMemcpyDeviceToHost,stream);
 }
 void MatterProbe(cudaStream_t stream,const PxVec4* positions,
-    const float* moisture,const float* temperature,uint32_t n,
+    const float* moisture,const float* temperature,
+    const uint32_t* bondedFaces,const uint32_t* brokenFaces,uint32_t n,
     const PxTransform* poses,uint32_t tableIndex,PxVec3 halfExtent,float radius,
     MatterDiagnosticsGpu* out) {
     ResetProbe<<<1,1,0,stream>>>(out);
-    if(n)Probe<<<256,256,0,stream>>>(positions,moisture,temperature,n,
+    if(n)Probe<<<256,256,0,stream>>>(positions,moisture,temperature,
+        bondedFaces,brokenFaces,n,
         poses,tableIndex,halfExtent,radius,out);
 }
 void MatterPack(cudaStream_t stream,const PxVec4* p,const float* moisture,

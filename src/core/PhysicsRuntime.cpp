@@ -119,7 +119,10 @@ struct PhysicsRuntime::Impl {
         PxU32 matterWetPhase{},matterDryPhase{};
         LabPhysicsMatterDescV1 matterDesc{};
         float* matterMoisture{},*matterNextMoisture{},*matterTemperature{},*matterExposure{};
+        uint32_t* matterBondedFaces{},*matterBrokenFaces{};
+        PxVec4* matterNextVelocities{};
         uint32_t* matterPhaseChangedDevice{},*matterPhaseChangedHost{};
+        uint32_t* matterVelocityChangedDevice{},*matterVelocityChangedHost{};
         MatterDiagnosticsGpu* matterProbeDevice{},*matterProbeHost{};
         cudaEvent_t matterProbeDone{},matterProbeBegin{},matterProbeEnd{};
         bool matterProbePending{};
@@ -298,6 +301,11 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
     if(matterNextMoisture)cudaFree(matterNextMoisture);
     if(matterTemperature)cudaFree(matterTemperature);
     if(matterExposure)cudaFree(matterExposure);
+    if(matterBondedFaces)cudaFree(matterBondedFaces);
+    if(matterBrokenFaces)cudaFree(matterBrokenFaces);
+    if(matterNextVelocities)cudaFree(matterNextVelocities);
+    if(matterVelocityChangedDevice)cudaFree(matterVelocityChangedDevice);
+    if(matterVelocityChangedHost)cudaFreeHost(matterVelocityChangedHost);
     if(matterPhaseChangedDevice)cudaFree(matterPhaseChangedDevice);
     if(matterPhaseChangedHost)cudaFreeHost(matterPhaseChangedHost);
     if(matterProbeDevice)cudaFree(matterProbeDevice);
@@ -610,6 +618,8 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal
             matterBuffer->raiseFlags(PxParticleBufferFlag::eUPDATE_PHASE);
             if(SessionLogCompact())++diagnostic.matterPhaseUpdates;
         }
+        if(*matterVelocityChangedHost)
+            matterBuffer->raiseFlags(PxParticleBufferFlag::eUPDATE_VELOCITY);
     }
     double simulateBegin=QpcNowSeconds();scene->simulate(desc.fixedStepSeconds);
     double simulateMs=(QpcNowSeconds()-simulateBegin)*1000;
@@ -633,12 +643,14 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal
     if(matterSystem){
         MatterEvolve(stream,matterBuffer->getPositionInvMasses(),matterBuffer->getVelocities(),
             matterBuffer->getPhases(),matterMoisture,matterNextMoisture,
-            matterTemperature,matterExposure,matterDesc.particleCount,
+            matterTemperature,matterExposure,matterBondedFaces,matterBrokenFaces,
+            matterNextVelocities,matterDesc.particleCount,
             matterSide,matterDesc.radius,matterWaterMass,matterVapor,
             matterWetPhase,matterDryPhase,lightDevice,uint32_t(lightHost.size()),
             current,airflowDevice,uint32_t(airflowHost.size()),angular,
             desc.fixedStepSeconds,float(simulationTime),
-            matterPhaseChangedDevice,matterPhaseChangedHost);
+            matterPhaseChangedDevice,matterPhaseChangedHost,
+            matterVelocityChangedDevice,matterVelocityChangedHost);
         Cuda(cudaGetLastError(),"evolve GPU PBD humidity and advected vapor");
         std::swap(matterVapor.density,matterVapor.next);
     }
@@ -710,8 +722,8 @@ void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
                     "measure GPU PBD state sample");
                 const auto& d=*matterProbeHost;
                 LogEvent(frame,"physics.matter.state",
-                    "active=%u wet=%u dry=%u hot=%u table_contacts=%u below_table=%u centers_min_xyz=%.5f,%.5f,%.5f centers_max_xyz=%.5f,%.5f,%.5f radius=%.6f sample_gpu_span_ms=%.3f",
-                    matterDesc.particleCount,d.wet,d.dry,d.hot,d.tableContacts,d.belowTable,
+                    "active=%u wet=%u dry=%u hot=%u table_contacts=%u below_table=%u bonded_faces=%u fractured_faces=%u centers_min_xyz=%.5f,%.5f,%.5f centers_max_xyz=%.5f,%.5f,%.5f radius=%.6f sample_gpu_span_ms=%.3f",
+                    matterDesc.particleCount,d.wet,d.dry,d.hot,d.tableContacts,d.belowTable,d.bondedFaces,d.fracturedFaces,
                     ordinate(d.lower[0]),ordinate(d.lower[1]),ordinate(d.lower[2]),
                     ordinate(d.upper[0]),ordinate(d.upper[1]),ordinate(d.upper[2]),
                     matterDesc.radius,sampleMs);
@@ -723,7 +735,8 @@ void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
             auto* table=FindBody(matterDesc.supportBody);
             const uint32_t tableIndex=table?table->index:PhysicsInvalidIndex;
             MatterProbe(stream,matterBuffer->getPositionInvMasses(),matterMoisture,
-                matterTemperature,matterDesc.particleCount,current,tableIndex,
+                matterTemperature,matterBondedFaces,matterBrokenFaces,
+                matterDesc.particleCount,current,tableIndex,
                 V(matterDesc.supportHalfExtent),matterDesc.radius,matterProbeDevice);
             Cuda(cudaGetLastError(),"sample every PhysX PBD particle on GPU");
             Cuda(cudaEventRecord(matterProbeEnd,stream),"end GPU PBD state sample");
@@ -1046,6 +1059,12 @@ uint32_t PhysicsRuntime::Impl::Scene::ConfigureMatter(const LabPhysicsMatterDesc
     if(!matterBuffer)Fail("PhysX GPU PBD particle buffer allocation failed");
     Allocate(matterMoisture,d.particleCount);Allocate(matterNextMoisture,d.particleCount);
     Allocate(matterTemperature,d.particleCount);Allocate(matterExposure,d.particleCount);
+    Allocate(matterBondedFaces,d.particleCount);Allocate(matterBrokenFaces,d.particleCount);
+    Allocate(matterNextVelocities,d.particleCount);
+    Allocate(matterVelocityChangedDevice,1);
+    Cuda(cudaHostAlloc(reinterpret_cast<void**>(&matterVelocityChangedHost),
+        sizeof(uint32_t),cudaHostAllocDefault),"allocate pinned PBD crust velocity flag");
+    *matterVelocityChangedHost=0;
     Allocate(matterPhaseChangedDevice,1);
     Cuda(cudaHostAlloc(reinterpret_cast<void**>(&matterPhaseChangedHost),
         sizeof(uint32_t),cudaHostAllocDefault),"allocate pinned PBD phase transition flag");
@@ -1070,6 +1089,7 @@ uint32_t PhysicsRuntime::Impl::Scene::ConfigureMatter(const LabPhysicsMatterDesc
     Cuda(cudaMemsetAsync(matterVapor.sources,0,cells*sizeof(float),stream),"initialize vapor sources");
     MatterInitialize(stream,matterBuffer->getPositionInvMasses(),matterBuffer->getVelocities(),
         matterBuffer->getPhases(),matterMoisture,matterTemperature,matterExposure,
+        matterBondedFaces,matterBrokenFaces,
         d.particleCount,matterSide,V(d.center),d.radius,1.f/mass,matterWetPhase);
     Cuda(cudaGetLastError(),"initialize GPU PBD matter");
     Cuda(cudaStreamSynchronize(stream),"commit GPU PBD initial particles");

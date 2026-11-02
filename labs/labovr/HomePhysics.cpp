@@ -222,6 +222,21 @@ void HomePhysics::Build(SceneData& assets){
         auto body=Body(rock);rockBodies_[i]=body;entities_.back().id="vase-rock-"+std::to_string(i);entities_.back().name="Grey rock "+std::to_string(i+1);
         Visual(body,Rock,Material::Rock,{width,.011f,depth});
     }
+    // A freely graspable rigid PhysX tool for impact/fracture testing.
+    // It is never kinematically scripted into the material and receives no
+    // special collision exception: controller impulses determine the hit.
+    buildingGroup_=7;
+    const XMFLOAT3 rodCenter{tableOrigin.x+.28f,
+        tableOrigin.y+tableHalfExtent.y+.018f,tableOrigin.z-.36f};
+    auto rodDesc=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_CAPSULE,
+        rodCenter,{.012f,.17f,0},.16f,RoomLayer);
+    rodDesc.staticFriction=.65f;rodDesc.dynamicFriction=.5f;
+    rodDesc.restitution=.04f;rodDesc.contactOffset=.006f;
+    const auto rod=Body(rodDesc);
+    entities_.back().id="matter-fracture-rod";
+    entities_.back().name="Matter fracture test rod";
+    Visual(rod,uint32_t(Mesh::Cylinder),Material::Bark,
+        {.024f,.36f,.024f},PoseAt({0,0,0},Rotation(0,0,-XM_PIDIV2)));
     // IDs of constraints refer to their declared body relation, not allocation order.
     buildingGroup_=0;
     optical_.lightIndex=lampLight_.sceneLightIndex;
