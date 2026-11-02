@@ -1,12 +1,11 @@
 {
   "schema_version": 1,
   "etat": "termine",
-  "cycle_id": "caca-aaa-001",
+  "cycle_id": "caca-aaa-002",
   "billet": "matiere-pbd-001",
-  "tentative": 4,
-  "base_sha": "7a16b64087624530b666b8e7df1120be66e88f51",
-  "source_sha": "4304d42ab67cf65d12fa52cf3fc1215ec460beac",
-  "autorisation_commit_sha": "85194f70d45dfb235d8dd8eb70d2dc021c5ce740",
-  "branche_source": "main",
-  "retour_qa_commit_sha": "8447f3771991f707c0603d1624820a52d46fb203"
+  "tentative": 1,
+  "base_sha": "e59e0346d2d4bd84c5a8636bff48b30ba7b47a24",
+  "source_sha": "7be5552797c4531900f270078919e0e41c3a4846",
+  "autorisation_commit_sha": "120b90855db8c9b638751289e4748844718f20f1",
+  "branche_source": "main"
 }
