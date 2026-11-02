@@ -956,10 +956,10 @@ uint32_t PhysicsRuntime::Impl::Scene::ConfigureMatter(const LabPhysicsMatterDesc
     matterSystem->setFluidRestOffset(d.radius*.78f);
     matterSystem->setMaxVelocity(12.f);
     matterWetPhase=matterSystem->createPhase(matterWet,
-        PxParticlePhaseFlag::eParticlePhaseFluid|PxParticlePhaseFlag::eParticlePhaseSelfCollide);
+        PxParticlePhaseFlags(PxParticlePhaseFlag::eParticlePhaseFluid) | PxParticlePhaseFlag::eParticlePhaseSelfCollide);
     matterDryPhase=matterSystem->createPhase(matterDry,
         PxParticlePhaseFlag::eParticlePhaseSelfCollide);
-    matterBuffer=runtime.physics->createParticleBuffer(d.particleCount,0,runtime.cuda);
+    matterBuffer=runtime.physics->createParticleBuffer(d.particleCount,runtime.cuda);
     if(!matterBuffer)Fail("PhysX GPU PBD particle buffer allocation failed");
     Allocate(matterMoisture,d.particleCount);Allocate(matterNextMoisture,d.particleCount);
     Allocate(matterTemperature,d.particleCount);Allocate(matterExposure,d.particleCount);
