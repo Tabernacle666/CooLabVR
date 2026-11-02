@@ -982,5 +982,11 @@ uint64_t PhysicsRuntime::CreateOwner(const LabGpuInteropServiceV1& interop){
 }
 void PhysicsRuntime::ResetOwner(uint64_t id){auto& r=*impl_;auto i=r.owners.find(id);if(i==r.owners.end())return;for(auto& [h,s]:i->second->scenes)s->Destroy();i->second->scenes.clear();}
 LabPhysicsServiceV1 PhysicsRuntime::Service(uint64_t id){auto it=impl_->owners.find(id);if(it==impl_->owners.end())Fail("PhysX owner unavailable");return it->second->service;}
+bool PhysicsRuntime::NeedsSynchronousAdvance() const{
+    impl_->Check();
+    for(const auto& [id,o]:impl_->owners)for(const auto& [h,s]:o->scenes)
+        if(!s->started||s->topologyDirty)return true;
+    return false;
+}
 void PhysicsRuntime::Advance(double now,uint64_t inputFrame){impl_->Check();for(auto& [id,o]:impl_->owners)for(auto& [h,s]:o->scenes)s->Advance(now,inputFrame);}
 }
