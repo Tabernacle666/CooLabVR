@@ -125,18 +125,6 @@ typedef struct LabPhysicsSnapshotV1 {
     double simulationSeconds;
 } LabPhysicsSnapshotV1;
 
-/* One optional, physically simulated PBD material volume per scene.
-   Counts are strict measurement profiles; all particles stay in PhysX GPU.
-   The rendered instances are derived from live device particle positions. */
-typedef struct LabPhysicsMatterDescV1 {
-    LabU32 structSize,particleCount,mesh,material;
-    LabVec3V1 center;
-    float radius,density;
-    /* Actual PhysX collider used only for GPU contact diagnostics. */
-    LabPhysicsBodyV1 supportBody;
-    LabVec3V1 supportHalfExtent;
-} LabPhysicsMatterDescV1;
-
 /* A table is scoped to one host/client generation. Handles are opaque, never reused
    across owners. Calls run on the console frame thread between simulation steps.
    The Core advances every scene automatically after clients issue commands.
@@ -200,7 +188,4 @@ typedef struct LabPhysicsServiceV1 {
     LabU32 (LABOVR_PLUGIN_CALL *SetPopulationSpace)(void*,LabPhysicsSceneV1,const LabPopulationSpaceV1*);
     /* Optional tail: toggle speculative CCD on one dynamic body at runtime. */
     LabU32 (LABOVR_PLUGIN_CALL *SetBodySpeculativeCCD)(void*,LabPhysicsSceneV1,LabPhysicsBodyV1,LabU32);
-    /* Optional tail (PBD). Nonzero return means a real GPU PBD system was
-       created; this never falls back to rigid proxies or CPU particles. */
-    LabU32 (LABOVR_PLUGIN_CALL *CreateMatter)(void*,LabPhysicsSceneV1,const LabPhysicsMatterDescV1*);
 } LabPhysicsServiceV1;

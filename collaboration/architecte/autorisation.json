@@ -3,11 +3,11 @@
   "role": "arch",
   "cycle_id": "caca-aaa-002",
   "billet": "matiere-pbd-001",
-  "source_sha": "754a05537ee2647fe3ad5f93c6791998cb508637",
+  "source_sha": "8272389e3c0b6b4cf4f29783d9f7f5217b818e99",
   "branche_source": "main",
-  "etat": "termine",
-  "ferme": true,
-  "decision": "continuer",
-  "tentative": 1,
-  "motif": "Reprise du masterticket depuis le moteur restauré. Tenir compte des constats et mesures du rapport architecte, sans réintroduire les régressions constatées."
+  "etat": "suspendu",
+  "ferme": false,
+  "decision": "reculer",
+  "tentative": 3,
+  "motif": "Retour au moteur précédant Caca AAA demandé par le propriétaire ; cycle interrompu."
 }

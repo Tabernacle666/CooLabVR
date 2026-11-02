@@ -27,7 +27,7 @@ class HomePhysics {
     std::string status_{"READY"};double simulationSeconds_{};
     LabPhysicsBodyV1 fanBase_{},fanRotor_{};LabPhysicsJointV1 fanJoint_{};
     std::array<LabPhysicsBodyV1,4> fanBodies_{};bool fanCcd_{};
-    LabPhysicsBodyV1 vaseBase_{};
+    LabPhysicsBodyV1 vaseBase_{},bonsaiBody_{};
     std::array<LabPhysicsBodyV1,40> rockBodies_{};
     float fanRpm_{900},fanActualRpm_{},fanWind_{1};bool fanEnabled_{true};
     LabMultisamplingV1 multisampling_{sizeof(LabMultisamplingV1),1};
