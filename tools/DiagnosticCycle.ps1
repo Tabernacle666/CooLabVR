@@ -50,6 +50,8 @@ try {
             else {
                 $changed = @(& git -C $project diff --name-only $relaySource HEAD -- src labs shaders cmake CMakeLists.txt)
                 if($changed.Count) { $relayEligible = $false; $relayError = 'Code modifié après la livraison QA : ' + ($changed -join ', ') }
+                $dirty = @(& git -C $project status --porcelain -- src labs shaders cmake CMakeLists.txt)
+                if($dirty.Count) { $relayEligible = $false; $relayError = 'Sources locales non commitées : ' + ($dirty -join ', ') }
             }
         }
     }
