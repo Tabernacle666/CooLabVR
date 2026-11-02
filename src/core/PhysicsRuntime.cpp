@@ -618,9 +618,14 @@ void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
         discarded=std::floor((owed-budget)/double(desc.fixedStepSeconds))*double(desc.fixedStepSeconds);
     droppedSeconds+=discarded;
     accumulator=owed-discarded;
-    populationSeconds+=std::max(0.,elapsed-discarded);uint32_t steps=0;
+    populationSeconds+=std::max(0.,elapsed-discarded);uint32_t steps=0;bool forceCommandsConsumed=false;
     uint32_t planned=std::min(desc.maxSubsteps,uint32_t((accumulator+1e-9)/desc.fixedStepSeconds));
-    while(accumulator+1e-9>=desc.fixedStepSeconds&&steps<desc.maxSubsteps){Step(float(steps+1)/float(std::max(1u,planned)),steps);accumulator-=desc.fixedStepSeconds;++steps;}
+    while(accumulator+1e-9>=desc.fixedStepSeconds&&steps<desc.maxSubsteps){
+        // Topology rebuild steps cannot upload force commands: keep them until
+        // a later step has valid Direct GPU indices.
+        forceCommandsConsumed|=started&&!topologyDirty&&dynamicCount>0;
+        Step(float(steps+1)/float(std::max(1u,planned)),steps);accumulator-=desc.fixedStepSeconds;++steps;
+    }
     alpha=float(std::clamp(accumulator/double(desc.fixedStepSeconds),0.,1.));
     if(descriptorsDirty&&started){Cuda(cudaStreamSynchronize(stream),"retire descriptor uploads");RefreshDescriptors();}
     if(started)QueueProbe();
@@ -628,7 +633,7 @@ void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
     // Continuous commands expire only after being consumed. An impulse survives
     // a display frame that had no physics tick.
     if(steps){for(const auto& c:commands)if(c.kind==LAB_PHYSICS_KINEMATIC_TARGET){if(auto* b=FindBody(c.body))b->lastTarget=P(c.target);}}
-    if(steps)std::erase_if(commands,[](const auto& c){return c.kind!=LAB_PHYSICS_IMPULSE&&c.kind!=LAB_PHYSICS_ANGULAR_IMPULSE;});
+    if(steps)std::erase_if(commands,[forceCommandsConsumed](const auto& c){return c.kind==LAB_PHYSICS_KINEMATIC_TARGET||(forceCommandsConsumed&&c.kind!=LAB_PHYSICS_IMPULSE&&c.kind!=LAB_PHYSICS_ANGULAR_IMPULSE);});
     const double frameCpuMs=(QpcNowSeconds()-begin)*1000.;
     if(SessionLogCompact()){
         ++diagnostic.frames;diagnostic.droppedFrames+=droppedSeconds>droppedBefore;
