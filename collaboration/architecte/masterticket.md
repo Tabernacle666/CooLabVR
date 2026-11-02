@@ -1,5 +1,5 @@
 # MASTER SHIT TICKET — CooLabVR · CACA AAA
-cycle_id: caca-aaa-001
+cycle_id: caca-aaa-002
 billet initial: matiere-pbd-001
 Objectif: refactor définitif PhysX GPU/CUDA/OpenXR pour vraie matière fécale particulaire, conservation du labo et 72 Hz mesurés.
 Le bonsaï est retiré ; la table reste manipulable. La matière semi-molle repose sur le système PhysX GPU PBD (PxPBDParticleSystem/PxParticleBuffer/PxPBDMaterial) avec des millions de particules physiques actives et non quelques blobs. Cibles à mesurer : 262144, 1048576, 2097152, 4194304 particules ; aucune promesse de 72 Hz sans benchmark.

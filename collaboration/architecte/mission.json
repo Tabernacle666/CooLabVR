@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "etat": "suspendu",
-  "cycle_id": "caca-aaa-001",
+  "etat": "en_cours",
+  "cycle_id": "caca-aaa-002",
   "billet": "matiere-pbd-001",
-  "source_sha": "8272389e3c0b6b4cf4f29783d9f7f5217b818e99",
-  "motif": "Cycle arrete a la demande du proprietaire apres restauration du moteur pre-Caca AAA."
+  "source_sha": "754a05537ee2647fe3ad5f93c6791998cb508637",
+  "motif": "Reprise demandée par le propriétaire depuis le moteur restauré. Masterticket et exigences maintenus."
 }
