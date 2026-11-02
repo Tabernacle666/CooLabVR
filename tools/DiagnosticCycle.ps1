@@ -228,7 +228,6 @@ try {
         tentative = [int]$relayDelivery.tentative
         verification_commit_sha = $relayQaCommit
         run_id = $runId
-        run_id = $runId
         finished_utc = (Get-Date).ToUniversalTime().ToString('o')
         build = $buildStatus
         build_exit = $buildExit
