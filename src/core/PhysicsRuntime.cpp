@@ -574,6 +574,9 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal
         j.lastDriveValid=true;
         if(SessionLogCompact())++diagnostic.motorWrites;
     }
+    // PBD phases and particle buffers are shared with CUDA. Explicitly retire
+    // field writes before PhysX consumes them; no unsynchronized device race.
+    if(matterSystem)Cuda(cudaStreamSynchronize(stream),"retire PBD CUDA writes before PhysX simulation");
     double simulateBegin=QpcNowSeconds();scene->simulate(desc.fixedStepSeconds);
     double simulateMs=(QpcNowSeconds()-simulateBegin)*1000;
     const double checkBegin=SessionLogCompact()?QpcNowSeconds():0.;
@@ -991,7 +994,9 @@ void PhysicsRuntime::Impl::Scene::StepPopulation(){
     constexpr double step=1./120.;
     while(insectAccumulator+1e-9>=step){insectAccumulator-=step;
     Cuda(cudaMemsetAsync(populationGrid,0,PopulationGridWords*sizeof(uint32_t),stream),"clear population broadphase");
-    PopulationStep(stream,insects,insectCount,population,populationInput,populationEffects,populationHands,populationBodies,populationBodyPoses,populationGrid,uint32_t(populationBodyHost.size()),previous,current,velocity,angular,forces,torques,lightDevice,uint32_t(lightHost.size()),airflowDevice,uint32_t(airflowHost.size()),populationSpace,float(step),desc.fixedStepSeconds,simulationTime,float(populationSeconds),policy.observerPresent);Cuda(cudaGetLastError(),"advance compact GPU flight and contacts");}
+    PopulationStep(stream,insects,insectCount,population,populationInput,populationEffects,populationHands,populationBodies,populationBodyPoses,populationGrid,uint32_t(populationBodyHost.size()),previous,current,velocity,angular,forces,torques,lightDevice,uint32_t(lightHost.size()),airflowDevice,uint32_t(airflowHost.size()),populationSpace,float(step),desc.fixedStepSeconds,simulationTime,float(populationSeconds),policy.observerPresent,
+        matterBuffer?matterBuffer->getPositionInvMasses():nullptr,
+        matterMoisture,matterTemperature,matterDesc.particleCount);Cuda(cudaGetLastError(),"advance compact GPU flight and contacts");}
 }
 void PhysicsRuntime::Impl::Scene::QueuePopulationReadback(){
     auto& r=populationReadbacks[populationReadCursor];if(r.pending){auto ready=cudaEventQuery(r.done);if(ready==cudaErrorNotReady)return;Cuda(ready,"population readback reuse");}

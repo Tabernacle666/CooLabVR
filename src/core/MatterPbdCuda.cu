@@ -51,7 +51,7 @@ __global__ void Environment(const PxVec4* positions,const PxVec4* velocities,
     // accelerates exposure through physical fragmentation, not a table rule.
     const PxVec4 v=velocities[i];
     const float agitation=sqrtf(v.x*v.x+v.y*v.y+v.z*v.z);
-    const float evaporation=(.00012f+.000008f*fmaxf(0.f,t-20.f))
+    const float evaporation=(.008f+.0008f*fmaxf(0.f,t-20.f))
         *(1.f+fminf(4.f,speed*.12f)+fminf(2.f,agitation*.08f));
     w=fmaxf(0.f,w-evaporation*dt);
     temperature[i]=t;moisture[i]=w;

@@ -222,6 +222,20 @@ void HomePhysics::Build(SceneData& assets){
         auto body=Body(rock);rockBodies_[i]=body;entities_.back().id="vase-rock-"+std::to_string(i);entities_.back().name="Grey rock "+std::to_string(i+1);
         Visual(body,Rock,Material::Rock,{width,.011f,depth});
     }
+    // IDs of constraints refer to their declared body relation, not allocation order.
+    buildingGroup_=0;
+    optical_.lightIndex=lampLight_.sceneLightIndex;
+    for(const auto& v:visuals_)if(v.body==bulb_){optical_.sourceId=v.id;break;}
+    PublishOptical();
+    Require(physics_->SetVisuals(physics_->serviceContext,scene_,visuals_.data(),uint32_t(visuals_.size()),&light,1),"Home physics_v1: physical visuals/light rejected");
+    LabPopulationDescV1 population{};population.structSize=sizeof(population);population.capacity=std::max(8192u,populationCount_);population.initialCount=populationCount_;population.layer=InsectLayer;population.collisionMask=RoomLayer|ChainLayer|HandLayer;
+    population.spawnCenter={-1.20f,1.95f,.20f};population.spawnHalfExtent={1.5f,.5f,1.2f};
+    population.proxyMesh=Proxy;population.bodyMesh=Thorax;population.headMesh=Head;population.abdomenMesh=Abdomen;population.leftWingMesh=WingLeft;population.rightWingMesh=WingRight;
+    population.bodyMaterial=uint32_t(Material::Fly);population.headMaterial=uint32_t(Material::Charcoal);population.wingMaterial=uint32_t(Material::Glue);population.flight=flight_;
+    Require(physics_->CreatePopulation(physics_->serviceContext,scene_,&population),"Home physics_v1: compact GPU population required");
+    Require(physics_->SetPopulationSpace(physics_->serviceContext,scene_,&populationSpace_),"Home physics_v1: flight volume rejected");
+    Require(physics_->SetPopulationEffects(physics_->serviceContext,scene_,&effects_),"Home physics_v1: population effects rejected");
+    flight_.impactSeconds=effects_.fleeSeconds;fog_.lightIndex=lampLight_.sceneLightIndex;Require(gpu_->SetFogSettings(gpu_->serviceContext,&fog_),"Home gpu_v1: volume settings rejected");
     // Matter is a PhysX GPU PBD volume with true particle/rigid contacts.
     // Do not attach it to the table: adhesion and gravity alone determine how
     // much remains when the table rotates or the material breaks apart.
@@ -244,20 +258,6 @@ void HomePhysics::Build(SceneData& assets){
         matterRadius,1050.f};
     Require(physics_->CreateMatter(physics_->serviceContext,scene_,&matter),
         "Home PhysX GPU PBD matter creation rejected");
-    // IDs of constraints refer to their declared body relation, not allocation order.
-    buildingGroup_=0;
-    optical_.lightIndex=lampLight_.sceneLightIndex;
-    for(const auto& v:visuals_)if(v.body==bulb_){optical_.sourceId=v.id;break;}
-    PublishOptical();
-    Require(physics_->SetVisuals(physics_->serviceContext,scene_,visuals_.data(),uint32_t(visuals_.size()),&light,1),"Home physics_v1: physical visuals/light rejected");
-    LabPopulationDescV1 population{};population.structSize=sizeof(population);population.capacity=std::max(8192u,populationCount_);population.initialCount=populationCount_;population.layer=InsectLayer;population.collisionMask=RoomLayer|ChainLayer|HandLayer;
-    population.spawnCenter={-1.20f,1.95f,.20f};population.spawnHalfExtent={1.5f,.5f,1.2f};
-    population.proxyMesh=Proxy;population.bodyMesh=Thorax;population.headMesh=Head;population.abdomenMesh=Abdomen;population.leftWingMesh=WingLeft;population.rightWingMesh=WingRight;
-    population.bodyMaterial=uint32_t(Material::Fly);population.headMaterial=uint32_t(Material::Charcoal);population.wingMaterial=uint32_t(Material::Glue);population.flight=flight_;
-    Require(physics_->CreatePopulation(physics_->serviceContext,scene_,&population),"Home physics_v1: compact GPU population required");
-    Require(physics_->SetPopulationSpace(physics_->serviceContext,scene_,&populationSpace_),"Home physics_v1: flight volume rejected");
-    Require(physics_->SetPopulationEffects(physics_->serviceContext,scene_,&effects_),"Home physics_v1: population effects rejected");
-    flight_.impactSeconds=effects_.fleeSeconds;fog_.lightIndex=lampLight_.sceneLightIndex;Require(gpu_->SetFogSettings(gpu_->serviceContext,&fog_),"Home gpu_v1: volume settings rejected");
 }
 void HomePhysics::ApplyDiagnosticDefaults(){
     if(!scene_)Fail("Diagnostic defaults require an active Home scene");
