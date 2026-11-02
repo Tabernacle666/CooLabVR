@@ -175,6 +175,9 @@ class DiagnosticHandContact {
     unsigned phase_{};uint64_t changedFrame_{};
     double started_{};
     float handX_{-.32f},baseline_{},distance_[2]{};
+    float observedHandX_{-.32f},observedTargetX_{},maxTargetX_{},maxHandX_{-.32f};
+    uint64_t samples_{},commands_{},lastSourceFrame_{},lastTick_{};
+    uint32_t maxContacts_{};
     const char* reason_{"not_started"};
     int Error(const char* reason){reason_=reason;return -1;}
     LabPhysicsBodyDescV1 Body(bool hand,float x,float y)const{
@@ -208,14 +211,18 @@ public:
         if(QpcNowSeconds()-started_>12.)return Error(reason_);
         LabPhysicsStateV1 states[4]{};LabPhysicsSnapshotV1 snap{sizeof(snap),4,states};
         if(!api_->PollSnapshot(api_->serviceContext,scene_,&snap))return 0;
-        const LabPhysicsStateV1* target{};bool handSeen=false;
+        const LabPhysicsStateV1* target{};const LabPhysicsStateV1* observedHand{};
         const unsigned index=phase_<=2?0u:1u;
         for(uint32_t i=0;i<snap.stateCount;i++){
             if(states[i].body==target_[index])target=&states[i];
-            if(states[i].body==hand_)handSeen=true;
+            if(states[i].body==hand_)observedHand=&states[i];
         }
-        if(!target||!handSeen||snap.sourceFrame<=changedFrame_)return 0;
-        if(!std::isfinite(target->pose.position.x))return Error("nonfinite_pose");
+        if(!target||!observedHand||snap.sourceFrame<=changedFrame_)return 0;
+        if(!std::isfinite(target->pose.position.x)||!std::isfinite(observedHand->pose.position.x))return Error("nonfinite_pose");
+        ++samples_;lastSourceFrame_=snap.sourceFrame;lastTick_=snap.simulationTick;
+        observedHandX_=observedHand->pose.position.x;observedTargetX_=target->pose.position.x;
+        maxHandX_=std::max(maxHandX_,observedHandX_);maxTargetX_=std::max(maxTargetX_,observedTargetX_);
+        maxContacts_=std::max(maxContacts_,target->contactCount);
         if(phase_==1||phase_==3){
             baseline_=target->pose.position.x;
             if(std::abs(baseline_)>.02f)return Error("target_moved_before_contact");
@@ -241,10 +248,20 @@ public:
         LabPhysicsCommandV1 move{};move.structSize=sizeof(move);move.kind=LAB_PHYSICS_KINEMATIC_TARGET;
         move.body=hand_;move.target.position={handX_,index?2.f:0.f,0};move.target.orientation={0,0,0,1};
         if(!api_->SubmitCommands(api_->serviceContext,scene_,&move,1))return Error("move_hand");
-        return 0;
+        ++commands_;return 0;
     }
     const char* Reason()const{return reason_;}
     float Distance(unsigned index)const{return distance_[index];}
+    float CommandedX()const{return handX_;}
+    float ObservedHandX()const{return observedHandX_;}
+    float ObservedTargetX()const{return observedTargetX_;}
+    float MaxHandX()const{return maxHandX_;}
+    float MaxTargetX()const{return maxTargetX_;}
+    uint64_t Samples()const{return samples_;}
+    uint64_t Commands()const{return commands_;}
+    uint64_t SourceFrame()const{return lastSourceFrame_;}
+    uint64_t Tick()const{return lastTick_;}
+    uint32_t Contacts()const{return maxContacts_;}
     void Close(){if(scene_){api_->DestroyScene(api_->serviceContext,scene_);scene_=0;}}
 };
 int RenderThread(Channels& io,const RunOptions& options) {
@@ -373,8 +390,13 @@ int RenderThread(Channels& io,const RunOptions& options) {
             const int result=diagnosticHand.Update(frame.input.frameId);
             if(result){
                 diagnosticHandPassed=result>0;
-                LogEvent(frame.input.frameId,"sweep.physics_hand","result=%s reason=%s first_displacement_m=%.5f second_displacement_m=%.5f",
-                    result>0?"pass":"fail",diagnosticHand.Reason(),diagnosticHand.Distance(0),diagnosticHand.Distance(1));
+                LogEvent(frame.input.frameId,"sweep.physics_hand",
+                    "result=%s reason=%s first_displacement_m=%.5f second_displacement_m=%.5f commanded_hand_x=%.5f observed_hand_x=%.5f max_hand_x=%.5f observed_target_x=%.5f max_target_x=%.5f contacts_max=%u samples=%llu commands=%llu source_frame=%llu tick=%llu",
+                    result>0?"pass":"fail",diagnosticHand.Reason(),diagnosticHand.Distance(0),diagnosticHand.Distance(1),
+                    diagnosticHand.CommandedX(),diagnosticHand.ObservedHandX(),diagnosticHand.MaxHandX(),
+                    diagnosticHand.ObservedTargetX(),diagnosticHand.MaxTargetX(),diagnosticHand.Contacts(),
+                    static_cast<unsigned long long>(diagnosticHand.Samples()),static_cast<unsigned long long>(diagnosticHand.Commands()),
+                    static_cast<unsigned long long>(diagnosticHand.SourceFrame()),static_cast<unsigned long long>(diagnosticHand.Tick()));
                 diagnosticHand.Close();diagnosticHandActive=false;
                 if(result<0)diagnosticFailed=true;
                 io.stop=true;
