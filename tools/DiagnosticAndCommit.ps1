@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments=$true)][string[]]$DiagnosticArgs)
 
 # Pull -> local VR diagnostic -> commit of this run and its relay receipt.
@@ -55,14 +55,18 @@ try {
     Write-Host '[2/4] Diagnostic automatique...'
     & $diagnosticBat @DiagnosticArgs
     $diagnosticExit = $LASTEXITCODE
-    Write-Host "Diagnostic terminé avec code $diagnosticExit."
+    Write-Host "Diagnostic termine avec code $diagnosticExit."
+    if($diagnosticExit -eq 11) {
+        Write-Host 'En attente du programmeur ou de QA : rien a commiter ni a pousser.'
+        exit 11
+    }
 
     if(-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
         throw 'Aucun reçu diagnostic produit. Aucune donnée ancienne ne sera commitée.'
     }
     $receiptFile = Get-Item -LiteralPath $receiptPath
     if($receiptFile.LastWriteTimeUtc -lt $diagnosticStartUtc.AddSeconds(-2)) {
-        throw 'Reçu diagnostic non renouvelé : cycle interrompu ou QA non conforme.'
+        throw 'Diagnostic sans nouveau recu : consulter son message d erreur; aucun ancien resultat ne sera reutilise.'
     }
     $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
     $id = [string]$receipt.run_id

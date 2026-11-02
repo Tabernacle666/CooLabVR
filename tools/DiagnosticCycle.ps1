@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateRange(15,600)][int]$Seconds = 120,
     [ValidateRange(1,32)][int]$Parallel = 6,
@@ -16,7 +16,7 @@ $runId = $stamp + '_' + $PID
 $runDir = Join-Path $project ('diagnostics\runs\' + $runId)
 $images = Join-Path $runDir 'screenshots'
 $raw = Join-Path $runDir '_raw'
-New-Item -ItemType Directory -Path $images,$raw -Force | Out-Null
+
 $cycleLog = Join-Path $runDir 'cycle.txt'
 $gameLog = Join-Path $runDir 'LaboVR_runtime.log'
 $sourceSha = $null
@@ -34,29 +34,66 @@ $relayQaCommit = $null
 $relaySource = $null
 $relayEligible = $false
 $relayError = ''
+function HasField($obj, [string]$name) {
+    return $null -ne $obj -and $null -ne $obj.PSObject.Properties[$name]
+}
 try {
     $deliveryPath = Join-Path $project 'collaboration\programmeur\livraison.json'
     $qaPath = Join-Path $project 'collaboration\verificateur\verification.json'
-    if((Test-Path $deliveryPath) -and (Test-Path $qaPath)) {
-        $relayDelivery = Get-Content $deliveryPath -Raw | ConvertFrom-Json
-        $relayQa = Get-Content $qaPath -Raw | ConvertFrom-Json
-        $relaySource = [string]$relayDelivery.source_sha
-        $relayQaCommit = (& git -C $project log -1 --format=%H -- collaboration/verificateur/verification.json 2>$null)
-        $same = $relayDelivery.cycle_id -eq $relayQa.cycle_id -and $relayDelivery.billet -eq $relayQa.billet -and $relayDelivery.source_sha -eq $relayQa.source_sha -and [int]$relayDelivery.tentative -eq [int]$relayQa.tentative
-        $relayEligible = $same -and $relayDelivery.etat -eq 'termine' -and $relayQa.etat -eq 'termine' -and $relayQa.examen -eq 'complet' -and $relayQa.resultat -eq 'conforme' -and [int]$relayQa.nombre_constats -eq 0 -and $relayQaCommit -match '^[a-f0-9]{40}$' -and $relaySource -match '^[a-f0-9]{40}$'
-        if($relayEligible) {
-            & git -C $project merge-base --is-ancestor $relaySource HEAD
-            if($LASTEXITCODE -ne 0) { $relayEligible = $false; $relayError = 'Source de livraison hors de la branche locale.' }
-            else {
-                $changed = @(& git -C $project diff --name-only $relaySource HEAD -- src labs shaders cmake CMakeLists.txt)
-                if($changed.Count) { $relayEligible = $false; $relayError = 'Code modifié après la livraison QA : ' + ($changed -join ', ') }
-                $dirty = @(& git -C $project status --porcelain -- src labs shaders cmake CMakeLists.txt)
-                if($dirty.Count) { $relayEligible = $false; $relayError = 'Sources locales non commitées : ' + ($dirty -join ', ') }
+    if(-not (Test-Path -LiteralPath $deliveryPath -PathType Leaf) -or
+       -not (Test-Path -LiteralPath $qaPath -PathType Leaf)) {
+        $relayError = 'Collaboration non initialisee : livraison ou rapport QA absent.'
+    } else {
+        $relayDelivery = Get-Content -LiteralPath $deliveryPath -Raw | ConvertFrom-Json
+        $relayQa = Get-Content -LiteralPath $qaPath -Raw | ConvertFrom-Json
+        $deliveryFields = @('schema_version','cycle_id','billet','source_sha','tentative','etat')
+        $qaFields = @('schema_version','cycle_id','billet','source_sha','tentative','etat','examen','resultat','nombre_constats')
+        $deliveryValid = @($deliveryFields | Where-Object { -not (HasField $relayDelivery $_) }).Count -eq 0
+        $qaValid = @($qaFields | Where-Object { -not (HasField $relayQa $_) }).Count -eq 0
+        if(-not $deliveryValid -or -not $relayDelivery.source_sha -or $relayDelivery.etat -ne 'termine') {
+            $relayError = 'Aucune livraison du programmeur terminee. L architecte doit d abord autoriser le billet.'
+        } elseif(-not $qaValid -or $relayQa.etat -ne 'termine') {
+            $relayError = 'Livraison presente, mais inspection QA statique pas encore terminee.'
+        } elseif($relayQa.resultat -ne 'conforme' -or $relayQa.examen -ne 'complet' -or [int]$relayQa.nombre_constats -ne 0) {
+            $relayError = 'QA a refuse le code. Retour au programmeur; pas de diagnostic utilisateur.'
+        } else {
+            $relaySource = [string]$relayDelivery.source_sha
+            $relayQaCommit = (& git -C $project log -1 --format=%H -- collaboration/verificateur/verification.json 2>$null)
+            $same = $relayDelivery.cycle_id -eq $relayQa.cycle_id -and
+                $relayDelivery.billet -eq $relayQa.billet -and
+                $relayDelivery.source_sha -eq $relayQa.source_sha -and
+                [int]$relayDelivery.tentative -eq [int]$relayQa.tentative
+            if(-not $same) {
+                $relayError = 'QA et livraison ne correspondent pas au meme billet, code ou tentative.'
+            } elseif($relayQaCommit -notmatch '^[a-f0-9]{40}$' -or $relaySource -notmatch '^[a-f0-9]{40}$') {
+                $relayError = 'SHA de livraison ou de verification QA invalide.'
+            } else {
+                & git -C $project merge-base --is-ancestor $relaySource HEAD
+                if($LASTEXITCODE -ne 0) {
+                    $relayError = 'SHA de livraison absent de la branche locale.'
+                } else {
+                    $changed = @(& git -C $project diff --name-only $relaySource HEAD -- src labs shaders cmake CMakeLists.txt)
+                    $dirty = @(& git -C $project status --porcelain -- src labs shaders cmake CMakeLists.txt)
+                    if($changed.Count -gt 0) {
+                        $relayError = 'Code modifie depuis la livraison QA : ' + ($changed -join ', ')
+                    } elseif($dirty.Count -gt 0) {
+                        $relayError = 'Sources locales non commitees : ' + ($dirty -join ', ')
+                    } else {
+                        $relayEligible = $true
+                    }
+                }
             }
         }
     }
-} catch { $relayError = $_.Exception.Message }
-if(-not $relayEligible) { throw "Diagnostic réservé à une livraison QA conforme, non modifiée. $relayError" }
+} catch {
+    $relayError = 'Precontrole QA impossible : ' + $_.Exception.Message
+}
+if(-not $relayEligible) {
+    Write-Host ('[ATTENTE QA] ' + $relayError)
+    Write-Host 'Aucun diagnostic lance, aucun nouveau resultat publie.'
+    exit 11
+}
+New-Item -ItemType Directory -Path $images,$raw -Force | Out-Null
 $localStatePath = Join-Path $project '.git\relay_local_status.json'
 function UpdateLocalState([string]$etat) {
     $state = [ordered]@{
