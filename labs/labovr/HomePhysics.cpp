@@ -242,9 +242,13 @@ void HomePhysics::Build(SceneData& assets){
     uint32_t matterCount=262144u;
     if(const char* profile=std::getenv("COOLAB_MATTER_PARTICLES")){
         const unsigned long requested=std::strtoul(profile,nullptr,10);
-        if(requested==262144ul||requested==1048576ul||
+        if(requested==0ul||requested==262144ul||requested==1048576ul||
            requested==2097152ul||requested==4194304ul)
             matterCount=uint32_t(requested);
+    }
+    if(!matterCount){
+        LogEvent(0,"home.matter","particles=0 mode=explicit_no_pbd_comparison");
+        return;
     }
     const uint32_t matterSide=matterCount==262144u?128u:
         matterCount==4194304u?256u:192u;
@@ -253,11 +257,13 @@ void HomePhysics::Build(SceneData& assets){
     const float matterRadius=.245f/float(matterSide);
     LabPhysicsMatterDescV1 matter{sizeof(matter),matterCount,
         uint32_t(Mesh::Sphere),uint32_t(Material::Bark),
-        {tableOrigin.x,tableOrigin.y+tableHalfHeight+
+        {tableOrigin.x-.49f,tableOrigin.y+tableHalfHeight+
             matterRadius*(float(levels)+1.f),tableOrigin.z},
         matterRadius,1050.f};
     Require(physics_->CreateMatter(physics_->serviceContext,scene_,&matter),
         "Home PhysX GPU PBD matter creation rejected");
+    LogEvent(0,"home.matter","particles=%u center=%.4f,%.4f,%.4f radius=%.6f mode=PhysX_GPU_PBD",
+        matterCount,matter.center.x,matter.center.y,matter.center.z,matterRadius);
 }
 void HomePhysics::ApplyDiagnosticDefaults(){
     if(!scene_)Fail("Diagnostic defaults require an active Home scene");
