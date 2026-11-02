@@ -118,7 +118,9 @@ struct PhysicsRuntime::Impl {
         PxPBDMaterial* matterWet{},*matterDry{};
         PxU32 matterWetPhase{},matterDryPhase{};
         LabPhysicsMatterDescV1 matterDesc{};
-        float* matterMoisture{},*matterTemperature{};
+        float* matterMoisture{},*matterNextMoisture{},*matterTemperature{},*matterExposure{};
+        MatterVaporField matterVapor{};
+        float matterWaterMass{};
         uint32_t matterSide{};
         uint32_t ConfigureMatter(const LabPhysicsMatterDescV1&);
         LabPopulationEffectsV1 populationEffects{sizeof(LabPopulationEffectsV1),0,.18f,1.f,12.f,1.3f,.55f,.7f,.35f};
@@ -284,7 +286,12 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
     {PxScopedCudaLock lock(*runtime.cuda);DestroyPublications();Cuda(cudaStreamSynchronize(stream),"retire physics scene");
     cudaFreeHost(forceHost);cudaFreeHost(torqueHost);cudaFreeHost(editPoseHost);cudaFreeHost(editIndexHost);cudaFree(editPoseDevice);cudaFree(editIndexDevice);cudaFree(editZeroDevice);
     if(matterMoisture)cudaFree(matterMoisture);
+    if(matterNextMoisture)cudaFree(matterNextMoisture);
     if(matterTemperature)cudaFree(matterTemperature);
+    if(matterExposure)cudaFree(matterExposure);
+    if(matterVapor.density)cudaFree(matterVapor.density);
+    if(matterVapor.next)cudaFree(matterVapor.next);
+    if(matterVapor.sources)cudaFree(matterVapor.sources);
     if(insects)cudaFree(insects);cudaFree(populationBodies);if(populationBodyPoses)cudaFree(populationBodyPoses);if(populationGrid)cudaFree(populationGrid);cudaFree(populationSummary);for(auto& r:populationReadbacks){cudaFreeHost(r.host);cudaEventDestroy(r.done);}
     for(auto& p:probeSlots){cudaFreeHost(p.host);cudaFreeHost(p.overflow);cudaEventDestroy(p.done);cudaEventDestroy(p.gpuBegin);cudaEventDestroy(p.gpuEnd);}
     CollectTimings();
@@ -593,11 +600,14 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal
     if(rebuild)RefreshIndices();if(descriptorsDirty)RefreshDescriptors();ReadState(!started||rebuild);
     if(matterSystem){
         MatterEvolve(stream,matterBuffer->getPositionInvMasses(),matterBuffer->getVelocities(),
-            matterBuffer->getPhases(),matterMoisture,matterTemperature,
-            matterDesc.particleCount,matterWetPhase,matterDryPhase,
-            lightDevice,uint32_t(lightHost.size()),current,airflowDevice,
-            uint32_t(airflowHost.size()),angular,desc.fixedStepSeconds,float(simulationTime));
-        Cuda(cudaGetLastError(),"evolve GPU PBD humidity and temperature");
+            matterBuffer->getPhases(),matterMoisture,matterNextMoisture,
+            matterTemperature,matterExposure,matterDesc.particleCount,
+            matterSide,matterDesc.radius,matterWaterMass,matterVapor,
+            matterWetPhase,matterDryPhase,lightDevice,uint32_t(lightHost.size()),
+            current,airflowDevice,uint32_t(airflowHost.size()),angular,
+            desc.fixedStepSeconds,float(simulationTime));
+        Cuda(cudaGetLastError(),"evolve GPU PBD humidity and advected vapor");
+        std::swap(matterVapor.density,matterVapor.next);
         matterBuffer->raiseFlags(PxParticleBufferFlag::eUPDATE_PHASE);
     }
     started=true;++tick;simulationTime+=desc.fixedStepSeconds;
@@ -951,11 +961,23 @@ uint32_t PhysicsRuntime::Impl::Scene::ConfigureMatter(const LabPhysicsMatterDesc
         PxParticlePhaseFlag::eParticlePhaseSelfCollide);
     matterBuffer=runtime.physics->createParticleBuffer(d.particleCount,0,runtime.cuda);
     if(!matterBuffer)Fail("PhysX GPU PBD particle buffer allocation failed");
-    Allocate(matterMoisture,d.particleCount);Allocate(matterTemperature,d.particleCount);
+    Allocate(matterMoisture,d.particleCount);Allocate(matterNextMoisture,d.particleCount);
+    Allocate(matterTemperature,d.particleCount);Allocate(matterExposure,d.particleCount);
     const float mass=d.density*(4.f/3.f)*PxPi*d.radius*d.radius*d.radius;
+    matterWaterMass=mass*.5f; // material water fraction, in kg per fully hydrated particle
+    matterVapor.dimension=64;
+    const float extent=std::max(8.f,2.f*d.radius*float(matterSide)+4.f);
+    matterVapor.cellSize=extent/float(matterVapor.dimension);
+    matterVapor.origin=V(d.center)-PxVec3(extent*.5f);
+    const uint32_t cells=matterVapor.dimension*matterVapor.dimension*matterVapor.dimension;
+    Allocate(matterVapor.density,cells);Allocate(matterVapor.next,cells);
+    Allocate(matterVapor.sources,cells);
+    Cuda(cudaMemsetAsync(matterVapor.density,0,cells*sizeof(float),stream),"initialize vapor density");
+    Cuda(cudaMemsetAsync(matterVapor.next,0,cells*sizeof(float),stream),"initialize vapor transport");
+    Cuda(cudaMemsetAsync(matterVapor.sources,0,cells*sizeof(float),stream),"initialize vapor sources");
     MatterInitialize(stream,matterBuffer->getPositionInvMasses(),matterBuffer->getVelocities(),
-        matterBuffer->getPhases(),matterMoisture,matterTemperature,d.particleCount,
-        matterSide,V(d.center),d.radius,1.f/mass,matterWetPhase);
+        matterBuffer->getPhases(),matterMoisture,matterTemperature,matterExposure,
+        d.particleCount,matterSide,V(d.center),d.radius,1.f/mass,matterWetPhase);
     Cuda(cudaGetLastError(),"initialize GPU PBD matter");
     Cuda(cudaStreamSynchronize(stream),"commit GPU PBD initial particles");
     matterBuffer->setNbActiveParticles(d.particleCount);
@@ -996,7 +1018,7 @@ void PhysicsRuntime::Impl::Scene::StepPopulation(){
     Cuda(cudaMemsetAsync(populationGrid,0,PopulationGridWords*sizeof(uint32_t),stream),"clear population broadphase");
     PopulationStep(stream,insects,insectCount,population,populationInput,populationEffects,populationHands,populationBodies,populationBodyPoses,populationGrid,uint32_t(populationBodyHost.size()),previous,current,velocity,angular,forces,torques,lightDevice,uint32_t(lightHost.size()),airflowDevice,uint32_t(airflowHost.size()),populationSpace,float(step),desc.fixedStepSeconds,simulationTime,float(populationSeconds),policy.observerPresent,
         matterBuffer?matterBuffer->getPositionInvMasses():nullptr,
-        matterMoisture,matterTemperature,matterDesc.particleCount);Cuda(cudaGetLastError(),"advance compact GPU flight and contacts");}
+        matterMoisture,matterTemperature,matterDesc.particleCount,matterVapor);Cuda(cudaGetLastError(),"advance compact GPU flight and contacts");}
 }
 void PhysicsRuntime::Impl::Scene::QueuePopulationReadback(){
     auto& r=populationReadbacks[populationReadCursor];if(r.pending){auto ready=cudaEventQuery(r.done);if(ready==cudaErrorNotReady)return;Cuda(ready,"population readback reuse");}

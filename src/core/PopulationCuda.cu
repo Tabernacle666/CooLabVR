@@ -86,8 +86,25 @@ __global__ void Init(PopulationStateGpu* states,uint32_t first,uint32_t count,La
     for(uint32_t pass=0;pass<4;pass++)for(uint32_t k=0;k<nb;k++)if(bodies[k].enabled){PxVec3 normal;float gap=Distance(bodies[k],BodyPose(bodies[k],poses),s.position,normal)-d.flight.bodyRadius;if(gap<0)s.position+=normal*(-gap+.0001f);}
     s.previous=s.position;s.heading=Safe(PxVec3(Unit(h+3)-.5f,(Unit(h+4)-.5f)*.4f,Unit(h+5)-.5f));s.velocity=s.heading*d.flight.nominalSpeed;s.activity=.6f;s.liftAxis=PxVec3(0,1,0);s.wingPhase=Unit(h+6)*6.2831853f;s.birth=h;states[first+i]=s;
 }
+__device__ float SampleVapor(MatterVaporField field,PxVec3 p) {
+    if(!field.density||!field.dimension)return 0.f;
+    const float x=(p.x-field.origin.x)/field.cellSize-.5f;
+    const float y=(p.y-field.origin.y)/field.cellSize-.5f;
+    const float z=(p.z-field.origin.z)/field.cellSize-.5f;
+    const int ix=int(floorf(x)),iy=int(floorf(y)),iz=int(floorf(z)),n=int(field.dimension);
+    if(ix<0||iy<0||iz<0||ix+1>=n||iy+1>=n||iz+1>=n)return 0.f;
+    const float fx=x-ix,fy=y-iy,fz=z-iz;
+    const uint32_t a=(uint32_t(iz)*field.dimension+uint32_t(iy))*field.dimension+uint32_t(ix);
+    const uint32_t dy=field.dimension,dz=dy*dy;
+    const float* v=field.density;
+    const float a0=(v[a]*(1.f-fx)+v[a+1]*fx)*(1.f-fy)
+        +(v[a+dy]*(1.f-fx)+v[a+dy+1]*fx)*fy;
+    const float a1=(v[a+dz]*(1.f-fx)+v[a+dz+1]*fx)*(1.f-fy)
+        +(v[a+dz+dy]*(1.f-fx)+v[a+dz+dy+1]*fx)*fy;
+    return a0*(1.f-fz)+a1*fz;
+}
 __global__ void Step(PopulationStateGpu* states,uint32_t count,LabPopulationDescV1 d,LabPopulationInputV1 input,LabPopulationEffectsV1 effects,LabPopulationHandsV1 hands,const PopulationBodyGpu* bodies,const PopulationBodyPoseGpu* world,const uint32_t* grid,uint32_t nb,const PxTransform* previous,const PxTransform* poses,const PxVec3* velocities,const PxVec3* angular,PxVec3* forces,PxVec3* torques,const PhysicsLightGpu* lights,uint32_t nl,const PhysicsAirflowGpu* airflows,uint32_t airflowCount,LabPopulationSpaceV1 space,float dt,float reactionDt,PopulationClock clock,bool observerPresent,const PxVec4* matter,
-    const float* matterMoisture,const float* matterTemperature,uint32_t matterCount){
+    const float* matterMoisture,const float* matterTemperature,uint32_t matterCount,MatterVaporField vapor){
     uint32_t i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count||!input.enabled)return;
     auto s=states[i];const auto& f=d.flight;PxVec3 old=s.position;PxVec3 noise=Fourier(s.birth,clock);
     // Local swept capsules share the tracking input for both hands. Acceleration
@@ -122,10 +139,8 @@ __global__ void Step(PopulationStateGpu* states,uint32_t count,LabPopulationDesc
             steer+=dir*(influence*pull)+Safe(dir.cross(noise),PxVec3(1,0,0))*(influence*.45f);
         }
     }
-    // Stratified samples are taken directly from the simulated PhysX particle
-    // buffer. Emission strength is a measured, spatially variable GPU field:
-    // cooling or drying a particle reduces its attraction, and fragmentation
-    // moves the source. The swarm count is never assigned to a fixed object.
+    // Direct thermal/humidity attraction comes from real PhysX particles.
+    // Vapor transport is a separate, accumulated CUDA field sampled below.
     if(matter&&matterMoisture&&matterTemperature&&matterCount){
         constexpr uint32_t samples=48;
         const uint32_t stride=(matterCount+samples-1)/samples;
@@ -148,6 +163,20 @@ __global__ void Step(PopulationStateGpu* states,uint32_t count,LabPopulationDesc
             const float influence=f.lightAttraction*fminf(2.f,intensity*.06f);
             steer+=direction*influence+
                 Safe(direction.cross(noise),PxVec3(0,1,0))*(influence*.3f);
+        }
+    }
+    if(vapor.density){
+        const float h=vapor.cellSize;
+        const float concentration=SampleVapor(vapor,s.position);
+        const PxVec3 g(
+            SampleVapor(vapor,s.position+PxVec3(h,0,0))-SampleVapor(vapor,s.position-PxVec3(h,0,0)),
+            SampleVapor(vapor,s.position+PxVec3(0,h,0))-SampleVapor(vapor,s.position-PxVec3(0,h,0)),
+            SampleVapor(vapor,s.position+PxVec3(0,0,h))-SampleVapor(vapor,s.position-PxVec3(0,0,h)));
+        const float strength=g.magnitude();
+        if(strength>1e-8f){
+            const PxVec3 direction=Safe(g);
+            const float influence=f.lightAttraction*fminf(2.f,(concentration+strength)*35.f);
+            steer+=direction*influence+Safe(direction.cross(noise),PxVec3(0,1,0))*(influence*.3f);
         }
     }
     float failure=Unit(s.birth+clock.failureEpoch*1664525u);float authority=failure<f.avoidanceFailure?.12f:1.f;
@@ -325,7 +354,7 @@ __global__ void Finish(const PopulationStateGpu* states,uint32_t count,uint32_t 
 }
 }
 void PopulationInitialize(cudaStream_t s,PopulationStateGpu* p,uint32_t first,uint32_t n,const LabPopulationDescV1& d,uint32_t birth,const PopulationBodyGpu* bodies,uint32_t nb,const PxTransform* poses){if(n)Init<<<(n+255)/256,256,0,s>>>(p,first,n,d,birth,bodies,nb,poses);}
-void PopulationStep(cudaStream_t s,PopulationStateGpu* p,uint32_t n,const LabPopulationDescV1& d,const LabPopulationInputV1& in,const LabPopulationEffectsV1& effects,const LabPopulationHandsV1& hands,const PopulationBodyGpu* bodies,PopulationBodyPoseGpu* world,uint32_t* grid,uint32_t nb,const PxTransform* previous,const PxTransform* poses,const PxVec3* v,const PxVec3* a,PxVec3* forces,PxVec3* torques,const PhysicsLightGpu* lights,uint32_t nl,const PhysicsAirflowGpu* airflows,uint32_t airflowCount,const LabPopulationSpaceV1& space,float dt,float reactionDt,double time,float realSeconds,bool observerPresent,const PxVec4* matter,const float* moisture,const float* temperature,uint32_t matterCount){if(n){if(nb)PrepareBodies<<<(nb+63)/64,64,0,s>>>(bodies,world,grid,nb,poses);PopulationClock clock{{float(fmod(time*.713,6.283185307)),float(fmod(time*1.117,6.283185307)),float(fmod(time*1.733,6.283185307))},uint32_t(fmod(time*2.,4294967296.)),realSeconds,float(time)};Step<<<(n+255)/256,256,0,s>>>(p,n,d,in,effects,hands,bodies,world,grid,nb,previous,poses,v,a,forces,torques,lights,nl,airflows,airflowCount,space,dt,reactionDt,clock,observerPresent,matter,moisture,temperature,matterCount);}}
+void PopulationStep(cudaStream_t s,PopulationStateGpu* p,uint32_t n,const LabPopulationDescV1& d,const LabPopulationInputV1& in,const LabPopulationEffectsV1& effects,const LabPopulationHandsV1& hands,const PopulationBodyGpu* bodies,PopulationBodyPoseGpu* world,uint32_t* grid,uint32_t nb,const PxTransform* previous,const PxTransform* poses,const PxVec3* v,const PxVec3* a,PxVec3* forces,PxVec3* torques,const PhysicsLightGpu* lights,uint32_t nl,const PhysicsAirflowGpu* airflows,uint32_t airflowCount,const LabPopulationSpaceV1& space,float dt,float reactionDt,double time,float realSeconds,bool observerPresent,const PxVec4* matter,const float* moisture,const float* temperature,uint32_t matterCount,MatterVaporField vapor){if(n){if(nb)PrepareBodies<<<(nb+63)/64,64,0,s>>>(bodies,world,grid,nb,poses);PopulationClock clock{{float(fmod(time*.713,6.283185307)),float(fmod(time*1.117,6.283185307)),float(fmod(time*1.733,6.283185307))},uint32_t(fmod(time*2.,4294967296.)),realSeconds,float(time)};Step<<<(n+255)/256,256,0,s>>>(p,n,d,in,effects,hands,bodies,world,grid,nb,previous,poses,v,a,forces,torques,lights,nl,airflows,airflowCount,space,dt,reactionDt,clock,observerPresent,matter,moisture,temperature,matterCount,vapor);}}
 void PopulationPack(cudaStream_t s,const PopulationStateGpu* p,uint32_t n,uint32_t capacity,const LabPopulationDescV1& d,const LabPopulationInputV1& in,const LabPopulationEffectsV1& effects,const PopulationBodyGpu* bodies,const PopulationBodyPoseGpu* world,uint32_t nb,const PhysicsLightGpu* lights,uint32_t nl,const PxTransform* poses,bool visible,GpuInstance* instances,uint32_t* control,uint32_t base,PopulationSummaryGpu* summary,uint64_t frame,uint64_t tick,float alpha,float realSeconds){
     ResetSummary<<<1,1,0,s>>>(summary,control,base,capacity,n,visible,frame,tick);if(n)Pack<<<(n+255)/256,256,0,s>>>(p,n,capacity,d,in,visible,instances,base,summary,alpha);Details<<<1,64,0,s>>>(p,n,d,in,visible,instances,base,summary,alpha);Shadows<<<(LAB_POPULATION_SHADOW_MAX_V1+255)/256,256,0,s>>>(p,n,d,effects,bodies,world,nb,lights,nl,poses,instances,base,visible,alpha);Finish<<<1,64,0,s>>>(p,n,capacity,d,visible,instances,control,base,summary,realSeconds);
 }
