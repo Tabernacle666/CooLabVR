@@ -188,7 +188,7 @@ try {
     $gpuExperiment = $null
     $continuity = $null
     $mutation = $null
-    $handContact = $null
+    $collision = $null
     $gpuPasses = @()
     $gpuQueues = @()
     if(Test-Path -LiteralPath $gameLog -PathType Leaf) {
@@ -209,8 +209,8 @@ try {
         if($continuityRows.Count) { $continuity = [string]$continuityRows[0] }
         $mutationRows = @($lines | Where-Object { $_ -match '\tsweep\.physics_mutation\t' } | Select-Object -Last 1)
         if($mutationRows.Count) { $mutation = [string]$mutationRows[0] }
-        $handRows = @($lines | Where-Object { $_ -match '\tsweep\.physics_hand\t' } | Select-Object -Last 1)
-        if($handRows.Count) { $handContact = [string]$handRows[0] }
+        $collisionRows = @($lines | Where-Object { $_ -match '\tsweep\.physics_collision\t' } | Select-Object -Last 1)
+        if($collisionRows.Count) { $collision = [string]$collisionRows[0] }
         $gpuTimingRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_timing\t' })
         $gpuExperimentRows = @($lines | Where-Object { $_ -match '\tsweep\.gpu_experiment\t' } | Select-Object -Last 1)
         if($xrRows.Count) { $xrProfile = [string]$xrRows[0] }
@@ -275,9 +275,9 @@ try {
         $errors.Add('Physics mutation invariant was not verified')
         Note 'ERROR: physics mutation invariant was not verified'
     }
-    if(($null -ne $gameExit) -and (-not $handContact -or $handContact -notmatch 'result=pass\b')) {
-        $errors.Add('Simulated hand contact was not verified')
-        Note 'ERROR: simulated hand contact was not verified'
+    if(($null -ne $gameExit) -and (-not $collision -or $collision -notmatch 'result=pass\b')) {
+        $errors.Add('Dynamic body collision was not verified')
+        Note 'ERROR: dynamic body collision was not verified'
     }
     if($gameExit -eq 0) {
         $requiredProfiles = @('cpu','wait','submit','motor','solver','transfer','gpu')
@@ -320,7 +320,7 @@ try {
         performance_gpu = $gpuMetrics
         population_continuity = $continuity
         physics_mutation = $mutation
-        physics_hand = $handContact
+        physics_collision = $collision
         performance_physics = @($physicsProfile)
         performance_xr = $xrProfile
         performance_gpu_timing = @($gpuTiming)

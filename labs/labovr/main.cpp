@@ -167,30 +167,29 @@ public:
     float Velocity()const{return velocity_;}
     void Close(){if(scene_){api_->DestroyScene(api_->serviceContext,scene_);scene_=0;}}
 };
-// A diagnostic-only kinematic collider exercises contact without XR input.
-class DiagnosticHandContact {
+// Two free dynamic bodies collide without synthetic XR input or gravity.
+class DiagnosticCollision {
     const LabPhysicsServiceV1* api_{};
     LabPhysicsSceneV1 scene_{};
-    LabPhysicsBodyV1 hand_{},oldHand_{},target_[2]{};
-    unsigned phase_{};uint64_t changedFrame_{};
+    LabPhysicsBodyV1 striker_{},oldStriker_{},target_[2]{};
+    unsigned phase_{};uint64_t changedFrame_{},launchFrame_{};
     double started_{};
-    float handX_{-.32f},baseline_{},distance_[2]{};
-    float observedHandX_{-.32f},observedTargetX_{},maxTargetX_{},maxHandX_{-.32f};
-    uint64_t samples_{},commands_{},lastSourceFrame_{},lastTick_{};
+    float baseline_{},distance_[2]{},targetVelocity_[2]{},momentum_[2]{};
+    float observedStrikerX_{-.35f},observedTargetX_{};
+    uint64_t samples_{},lastSourceFrame_{},lastTick_{};
     uint32_t maxContacts_{};
     const char* reason_{"not_started"};
     int Error(const char* reason){reason_=reason;return -1;}
-    LabPhysicsBodyDescV1 Body(bool hand,float x,float y)const{
+    LabPhysicsBodyDescV1 Body(float x,float y)const{
         LabPhysicsBodyDescV1 d{};d.structSize=sizeof(d);
-        d.kind=hand?LAB_PHYSICS_KINEMATIC:LAB_PHYSICS_DYNAMIC;
-        d.shape=LAB_PHYSICS_BOX;d.layer=hand?1u:2u;d.collisionMask=hand?2u:1u;
+        d.kind=LAB_PHYSICS_DYNAMIC;d.shape=LAB_PHYSICS_BOX;d.layer=1;d.collisionMask=1;
         d.pose.position={x,y,0};d.pose.orientation={0,0,0,1};d.shapePose.orientation={0,0,0,1};
-        d.dimensions={.05f,.05f,.05f};d.mass=1;d.staticFriction=.6f;
-        d.dynamicFriction=.4f;d.contactOffset=.002f;d.maxAngularVelocity=100;return d;
+        d.dimensions={.05f,.05f,.05f};d.mass=1;d.staticFriction=.6f;d.dynamicFriction=.4f;
+        d.restitution=.2f;d.contactOffset=.002f;d.maxAngularVelocity=100;return d;
     }
-    bool Probes(bool includeHand){
-        LabPhysicsBodyV1 bodies[]{target_[0],target_[1],hand_};
-        return api_->SetProbes(api_->serviceContext,scene_,bodies,includeHand?3u:2u)!=0;
+    bool Probes(bool includeStriker){
+        LabPhysicsBodyV1 bodies[]{target_[0],target_[1],striker_};
+        return api_->SetProbes(api_->serviceContext,scene_,bodies,includeStriker?3u:2u)!=0;
     }
 public:
     bool Start(const LabHostApiV1& host){
@@ -199,10 +198,10 @@ public:
         if(!api_){reason_="service";return false;}
         LabPhysicsSceneDescV1 desc{sizeof(desc),8,{0,0,0},1.f/120.f,2,0};
         if(!api_->CreateScene(api_->serviceContext,&desc,&scene_)){reason_="scene";return false;}
-        auto a=Body(false,0,0),b=Body(false,0,2),h=Body(true,handX_,0);
+        auto a=Body(0,0),b=Body(0,2),projectile=Body(-.35f,0);
         if(!api_->CreateBody(api_->serviceContext,scene_,&a,&target_[0])||
            !api_->CreateBody(api_->serviceContext,scene_,&b,&target_[1])||
-           !api_->CreateBody(api_->serviceContext,scene_,&h,&hand_)||!Probes(true)){
+           !api_->CreateBody(api_->serviceContext,scene_,&projectile,&striker_)||!Probes(true)){
             reason_="create_bodies";return false;
         }
         phase_=1;reason_="waiting_first_baseline";return true;
@@ -211,54 +210,55 @@ public:
         if(QpcNowSeconds()-started_>12.)return Error(reason_);
         LabPhysicsStateV1 states[4]{};LabPhysicsSnapshotV1 snap{sizeof(snap),4,states};
         if(!api_->PollSnapshot(api_->serviceContext,scene_,&snap))return 0;
-        const LabPhysicsStateV1* target{};const LabPhysicsStateV1* observedHand{};
+        const LabPhysicsStateV1* target{};const LabPhysicsStateV1* striker{};
         const unsigned index=phase_<=2?0u:1u;
         for(uint32_t i=0;i<snap.stateCount;i++){
             if(states[i].body==target_[index])target=&states[i];
-            if(states[i].body==hand_)observedHand=&states[i];
+            if(states[i].body==striker_)striker=&states[i];
         }
-        if(!target||!observedHand||snap.sourceFrame<=changedFrame_)return 0;
-        if(!std::isfinite(target->pose.position.x)||!std::isfinite(observedHand->pose.position.x))return Error("nonfinite_pose");
+        if(!target||!striker||snap.sourceFrame<=changedFrame_)return 0;
+        if(!std::isfinite(target->pose.position.x)||!std::isfinite(striker->pose.position.x)||
+           !std::isfinite(target->linearVelocity.x)||!std::isfinite(striker->linearVelocity.x))
+            return Error("nonfinite_state");
         ++samples_;lastSourceFrame_=snap.sourceFrame;lastTick_=snap.simulationTick;
-        observedHandX_=observedHand->pose.position.x;observedTargetX_=target->pose.position.x;
-        maxHandX_=std::max(maxHandX_,observedHandX_);maxTargetX_=std::max(maxTargetX_,observedTargetX_);
+        observedStrikerX_=striker->pose.position.x;observedTargetX_=target->pose.position.x;
         maxContacts_=std::max(maxContacts_,target->contactCount);
         if(phase_==1||phase_==3){
             baseline_=target->pose.position.x;
-            if(std::abs(baseline_)>.02f)return Error("target_moved_before_contact");
-            ++phase_;reason_=phase_==2?"waiting_first_contact":"waiting_second_contact";
+            if(std::abs(baseline_)>.02f||std::abs(target->linearVelocity.x)>.02f||
+               std::abs(striker->pose.position.x+.35f)>.02f||std::abs(striker->linearVelocity.x)>.02f)
+                return Error("invalid_baseline");
+            LabPhysicsCommandV1 impulse{};impulse.structSize=sizeof(impulse);impulse.kind=LAB_PHYSICS_IMPULSE;
+            impulse.body=striker_;impulse.value={1,0,0};impulse.target.orientation={0,0,0,1};
+            if(!api_->SubmitCommands(api_->serviceContext,scene_,&impulse,1))return Error("launch");
+            launchFrame_=frame;++phase_;reason_=index?"waiting_second_collision":"waiting_first_collision";return 0;
         }
         const float distance=target->pose.position.x-baseline_;
-        if(distance>.03f){
-            distance_[index]=distance;
+        const float momentum=striker->linearVelocity.x+target->linearVelocity.x; // both masses are 1 kg
+        if(snap.sourceFrame>launchFrame_&&distance>.03f&&target->linearVelocity.x>.1f){
+            if(momentum<.65f||momentum>1.35f)return Error("momentum_out_of_range");
+            distance_[index]=distance;targetVelocity_[index]=target->linearVelocity.x;momentum_[index]=momentum;
             if(index==1){reason_="ok";return 1;}
-            if(!Probes(false)||!api_->DestroyBody(api_->serviceContext,scene_,hand_))
-                return Error("remove_hand");
-            oldHand_=hand_;
-            LabPhysicsCommandV1 stale{};stale.structSize=sizeof(stale);stale.kind=LAB_PHYSICS_KINEMATIC_TARGET;
-            stale.body=oldHand_;stale.target.orientation={0,0,0,1};
-            if(api_->SubmitCommands(api_->serviceContext,scene_,&stale,1))
-                return Error("stale_hand_accepted");
-            handX_=-.32f;auto h=Body(true,handX_,2);
-            if(!api_->CreateBody(api_->serviceContext,scene_,&h,&hand_)||hand_==oldHand_||!Probes(true))
-                return Error("recreate_hand");
+            if(!Probes(false)||!api_->DestroyBody(api_->serviceContext,scene_,striker_))
+                return Error("remove_striker");
+            oldStriker_=striker_;
+            LabPhysicsCommandV1 stale{};stale.structSize=sizeof(stale);stale.kind=LAB_PHYSICS_IMPULSE;
+            stale.body=oldStriker_;stale.value={1,0,0};stale.target.orientation={0,0,0,1};
+            if(api_->SubmitCommands(api_->serviceContext,scene_,&stale,1))return Error("stale_striker_accepted");
+            auto projectile=Body(-.35f,2);
+            if(!api_->CreateBody(api_->serviceContext,scene_,&projectile,&striker_)||striker_==oldStriker_||!Probes(true))
+                return Error("recreate_striker");
             changedFrame_=frame;phase_=3;reason_="waiting_second_baseline";return 0;
         }
-        handX_=std::min(handX_+.006f,.30f);
-        LabPhysicsCommandV1 move{};move.structSize=sizeof(move);move.kind=LAB_PHYSICS_KINEMATIC_TARGET;
-        move.body=hand_;move.target.position={handX_,index?2.f:0.f,0};move.target.orientation={0,0,0,1};
-        if(!api_->SubmitCommands(api_->serviceContext,scene_,&move,1))return Error("move_hand");
-        ++commands_;return 0;
+        return 0;
     }
     const char* Reason()const{return reason_;}
     float Distance(unsigned index)const{return distance_[index];}
-    float CommandedX()const{return handX_;}
-    float ObservedHandX()const{return observedHandX_;}
-    float ObservedTargetX()const{return observedTargetX_;}
-    float MaxHandX()const{return maxHandX_;}
-    float MaxTargetX()const{return maxTargetX_;}
+    float TargetVelocity(unsigned index)const{return targetVelocity_[index];}
+    float Momentum(unsigned index)const{return momentum_[index];}
+    float StrikerX()const{return observedStrikerX_;}
+    float TargetX()const{return observedTargetX_;}
     uint64_t Samples()const{return samples_;}
-    uint64_t Commands()const{return commands_;}
     uint64_t SourceFrame()const{return lastSourceFrame_;}
     uint64_t Tick()const{return lastTick_;}
     uint32_t Contacts()const{return maxContacts_;}
@@ -301,7 +301,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
     PopulationContinuityCheck diagnosticContinuity;
     bool diagnosticHiddenActive=false,diagnosticContinuityPassed=false;
     DiagnosticMutation diagnosticMutation;bool diagnosticMutationActive=false,diagnosticMutationPassed=false;
-    DiagnosticHandContact diagnosticHand;bool diagnosticHandActive=false,diagnosticHandPassed=false;
+    DiagnosticCollision diagnosticCollision;bool diagnosticCollisionActive=false,diagnosticCollisionPassed=false;
     uint64_t diagnosticHiddenFirstFrame=0;
     double diagnosticHiddenStarted=0.;
     StageCpu xrWaitCpu,xrBeginCpu,xrSyncCpu,xrLocateCpu,xrAcquireColorCpu,
@@ -378,26 +378,26 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 diagnosticMutation.Close();diagnosticMutationActive=false;
                 if(result<0){diagnosticFailed=true;io.stop=true;}
                 else{
-                    diagnosticHandActive=diagnosticHand.Start(homeApi);
-                    if(!diagnosticHandActive){
-                        LogEvent(frame.input.frameId,"sweep.physics_hand","result=fail reason=%s",diagnosticHand.Reason());
-                        diagnosticHand.Close();diagnosticFailed=true;io.stop=true;
+                    diagnosticCollisionActive=diagnosticCollision.Start(homeApi);
+                    if(!diagnosticCollisionActive){
+                        LogEvent(frame.input.frameId,"sweep.physics_collision","result=fail reason=%s",diagnosticCollision.Reason());
+                        diagnosticCollision.Close();diagnosticFailed=true;io.stop=true;
                     }
                 }
             }
         }
-        if(diagnosticHandActive){
-            const int result=diagnosticHand.Update(frame.input.frameId);
+        if(diagnosticCollisionActive){
+            const int result=diagnosticCollision.Update(frame.input.frameId);
             if(result){
-                diagnosticHandPassed=result>0;
-                LogEvent(frame.input.frameId,"sweep.physics_hand",
-                    "result=%s reason=%s first_displacement_m=%.5f second_displacement_m=%.5f commanded_hand_x=%.5f observed_hand_x=%.5f max_hand_x=%.5f observed_target_x=%.5f max_target_x=%.5f contacts_max=%u samples=%llu commands=%llu source_frame=%llu tick=%llu",
-                    result>0?"pass":"fail",diagnosticHand.Reason(),diagnosticHand.Distance(0),diagnosticHand.Distance(1),
-                    diagnosticHand.CommandedX(),diagnosticHand.ObservedHandX(),diagnosticHand.MaxHandX(),
-                    diagnosticHand.ObservedTargetX(),diagnosticHand.MaxTargetX(),diagnosticHand.Contacts(),
-                    static_cast<unsigned long long>(diagnosticHand.Samples()),static_cast<unsigned long long>(diagnosticHand.Commands()),
-                    static_cast<unsigned long long>(diagnosticHand.SourceFrame()),static_cast<unsigned long long>(diagnosticHand.Tick()));
-                diagnosticHand.Close();diagnosticHandActive=false;
+                diagnosticCollisionPassed=result>0;
+                LogEvent(frame.input.frameId,"sweep.physics_collision",
+                    "result=%s reason=%s first_displacement_m=%.5f second_displacement_m=%.5f first_target_velocity=%.5f second_target_velocity=%.5f first_momentum=%.5f second_momentum=%.5f striker_x=%.5f target_x=%.5f contacts_max=%u samples=%llu source_frame=%llu tick=%llu",
+                    result>0?"pass":"fail",diagnosticCollision.Reason(),diagnosticCollision.Distance(0),diagnosticCollision.Distance(1),
+                    diagnosticCollision.TargetVelocity(0),diagnosticCollision.TargetVelocity(1),diagnosticCollision.Momentum(0),diagnosticCollision.Momentum(1),
+                    diagnosticCollision.StrikerX(),diagnosticCollision.TargetX(),diagnosticCollision.Contacts(),
+                    static_cast<unsigned long long>(diagnosticCollision.Samples()),static_cast<unsigned long long>(diagnosticCollision.SourceFrame()),
+                    static_cast<unsigned long long>(diagnosticCollision.Tick()));
+                diagnosticCollision.Close();diagnosticCollisionActive=false;
                 if(result<0)diagnosticFailed=true;
                 io.stop=true;
             }
@@ -593,7 +593,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
     }
     io.stop=true;
     if(diagnosticHiddenActive){home.SetAmbientVisible(true);diagnosticHiddenActive=false;}
-    diagnosticMutation.Close();diagnosticHand.Close();
+    diagnosticMutation.Close();diagnosticCollision.Close();
     if(diagnosticGpuActive){
         graphics.EndPerformanceCapture();
         xr.SetPerformanceCaptureActive(false);
@@ -701,7 +701,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 xrAcquireColorCpu.Average(),xrWaitColorCpu.Average(),xrAcquireDepthCpu.Average(),
                 xrWaitDepthCpu.Average(),xrEndCpu.Average());
         }
-        if(diagnosticFailed||!diagnosticContinuityPassed||!diagnosticMutationPassed||!diagnosticHandPassed||diagnosticSlot!=diagnosticViews.size())return 3;
+        if(diagnosticFailed||!diagnosticContinuityPassed||!diagnosticMutationPassed||!diagnosticCollisionPassed||diagnosticSlot!=diagnosticViews.size())return 3;
     }
     return options.gpuValidation&&!clean?2:0;
 }
