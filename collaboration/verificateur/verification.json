@@ -1,1 +1,32 @@
-{}
+{
+  "schema_version": 1,
+  "role": "qa",
+  "cycle_id": "caca-aaa-001",
+  "billet": "matiere-pbd-001",
+  "source_sha": "0942f59b4e91657ae47c021425270dab91207a90",
+  "autorisation_commit_sha": "fac8846703a8b7ff380db78b57bb80215b621c6a",
+  "tentative": 1,
+  "etat": "termine",
+  "examen": "complet",
+  "resultat": "a_corriger",
+  "destination": "dev",
+  "nombre_constats": 2,
+  "constats": [
+    {
+      "id": "QA-PBD-001",
+      "fichier": "src/core/MatterPbdCuda.cu",
+      "symbole": "Init / Environment",
+      "preuve": "L22 : toute particule commence avec moisture=1 et temperature=28. L47-58 : Environment applique w=max(0,w-evaporation*dt) et choisit la phase uniquement selon w>.28, sans voisinage, exposition de surface, occlusion ni distinction intérieur/extérieur. La livraison augmente le coefficient initial de .00012 à .008 (L54).",
+      "exigence": "Le masterticket impose un séchage de surface formant une croûte plus rigide, avec conservation de l'humidité interne et exposition de celle-ci par fissuration physique.",
+      "consequence": "La loi assèche également le cœur des particules dès le départ ; elle ne peut établir le front extérieur/intérieur nécessaire à la croûte et à l'humidité révélée par une fissure."
+    },
+    {
+      "id": "QA-PBD-002",
+      "fichier": "src/core/MatterPbdCuda.cu",
+      "symbole": "Environment / MatterEvolve",
+      "preuve": "L24-59 : l'environnement lit airflows et lumière mais n'écrit que temperature, moisture et phases. L90-98 : MatterEvolve ne retourne et n'alimente aucun champ d'émission/vapeur. PhysicsRuntime.cpp L594-601 appelle seulement cette évolution puis eUPDATE_PHASE. PopulationCuda.cu L129-150 utilise un gradient moisture*temperature pour l'orientation des mouches, sans champ de vapeur transporté.",
+      "exigence": "Le masterticket exige un flux de vapeur réel, intensifié temporairement par fissure et transporté dans les champs CUDA, relié aux effets de la matière.",
+      "consequence": "Aucun flux volumique de vapeur émis par les particules ne peut être advecté ou réagir à une fissure ; le couplage des mouches n'établit pas ce transport."
+    }
+  ]
+}
