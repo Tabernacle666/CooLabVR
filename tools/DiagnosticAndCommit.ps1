@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments=$true)][string[]]$DiagnosticArgs)
 
 # Pull -> local VR diagnostic -> commit of this run and its relay receipt.
@@ -24,14 +24,14 @@ function RelayAvailable {
 try {
     if(-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'Git est absent du PATH.' }
     $branch = (& git -C $project branch --show-current)
-    if($LASTEXITCODE -ne 0 -or $branch -ne 'main') { throw 'Le cycle doit être exécuté sur la branche main.' }
+    if($LASTEXITCODE -ne 0 -or $branch -ne 'main') { throw 'Le cycle doit etre execute sur la branche main.' }
     $index = @(& git -C $project diff --cached --name-only)
     if($LASTEXITCODE -ne 0 -or $index.Count -ne 0) {
-        throw 'Index Git non vide : aucune donnée déjà stagée ne doit entrer dans le commit diagnostic.'
+        throw 'Index Git non vide : aucune donnee deja stagee ne doit entrer dans le commit diagnostic.'
     }
 
     if(-not (RelayAvailable)) {
-        Write-Host '[0/4] Démarrage de la passerelle locale...'
+        Write-Host '[0/4] Demarrage de la passerelle locale...'
         $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"' + $relayScript + '"'))
         Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Minimized | Out-Null
         $ready = $false
@@ -40,7 +40,7 @@ try {
             if(RelayAvailable) { $ready = $true; break }
         }
         if(-not $ready) { Write-Warning 'Passerelle locale indisponible. Le cycle Git/diagnostic reste possible.' }
-    } else { Write-Host '[0/4] Passerelle locale déjà démarrée.' }
+    } else { Write-Host '[0/4] Passerelle locale deja demarree.' }
 
     Write-Host '[1/4] git pull --ff-only origin main'
     GitRequired @('pull','--ff-only','origin','main')
@@ -62,7 +62,7 @@ try {
     }
 
     if(-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
-        throw 'Aucun reçu diagnostic produit. Aucune donnée ancienne ne sera commitée.'
+        throw 'Aucun recu diagnostic produit. Aucune donnee ancienne ne sera commitee.'
     }
     $receiptFile = Get-Item -LiteralPath $receiptPath
     if($receiptFile.LastWriteTimeUtc -lt $diagnosticStartUtc.AddSeconds(-2)) {
@@ -71,24 +71,24 @@ try {
     $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
     $id = [string]$receipt.run_id
     if($id -notmatch '^[0-9]{8}_[0-9]{6}_[0-9]{3}_[0-9]+$') { throw 'Identifiant du diagnostic invalide.' }
-    if($previousRuns -contains $id) { throw 'Le diagnostic n’a pas créé de nouveau répertoire.' }
+    if($previousRuns -contains $id) { throw 'Le diagnostic n a pas cree de nouveau repertoire.' }
     $runDir = Join-Path $runsPath $id
-    if(-not (Test-Path -LiteralPath $runDir -PathType Container)) { throw 'Répertoire du nouveau diagnostic absent.' }
+    if(-not (Test-Path -LiteralPath $runDir -PathType Container)) { throw 'Repertoire du nouveau diagnostic absent.' }
     $manifestPath = Join-Path $runDir 'manifest.json'
     if(-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'Manifeste du nouveau diagnostic absent.' }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if($manifest.run_id -ne $id -or $manifest.source_commit -ne $receipt.source_sha -or
        $manifest.verification_commit_sha -ne $receipt.verification_commit_sha -or
        $manifest.cycle_id -ne $receipt.cycle_id -or $manifest.billet -ne $receipt.billet) {
-        throw 'Le reçu ne correspond pas au manifeste. Aucun commit.'
+        throw 'Le recu ne correspond pas au manifeste. Aucun commit.'
     }
     $expectedManifest = "diagnostics/runs/$id/manifest.json"
     if($receipt.manifest_path -ne $expectedManifest) { throw 'Chemin du manifeste inattendu.' }
     if(($diagnosticExit -eq 0) -ne ($receipt.etat -eq 'complet')) {
-        throw 'État du diagnostic contradictoire avec son code de sortie.'
+        throw 'Etat du diagnostic contradictoire avec son code de sortie.'
     }
 
-    Write-Host '[3/4] Préparation des journaux, JPG et reçu...'
+    Write-Host '[3/4] Preparation des journaux, JPG et recu...'
     $files = @(Get-ChildItem -LiteralPath $runDir -Recurse -File | Where-Object {
         -not $_.FullName.StartsWith((Join-Path $runDir '_raw') + '\',[StringComparison]::OrdinalIgnoreCase)
     } | ForEach-Object {
@@ -98,26 +98,26 @@ try {
     $allowedPrefix = "diagnostics/runs/$id/"
     $toStage = @('collaboration/diagnostic/retour.json') + $files
     & git -C $project add -f -- @toStage
-    if($LASTEXITCODE -ne 0) { throw 'Impossible de préparer les fichiers du diagnostic.' }
+    if($LASTEXITCODE -ne 0) { throw 'Impossible de preparer les fichiers du diagnostic.' }
 
     $staged = @(& git -C $project diff --cached --name-only)
-    if($LASTEXITCODE -ne 0 -or $staged.Count -eq 0) { throw 'Aucune modification prête à être commitée.' }
+    if($LASTEXITCODE -ne 0 -or $staged.Count -eq 0) { throw 'Aucune modification prete a etre commitee.' }
     foreach($path in $staged) {
         if($path -ne 'collaboration/diagnostic/retour.json' -and
            -not $path.StartsWith($allowedPrefix,[StringComparison]::Ordinal)) {
-            throw "Fichier inattendu dans l’index : $path ; aucun commit."
+            throw "Fichier inattendu dans l index : $path ; aucun commit."
         }
     }
 
     Write-Host '[4/4] git commit -m "Diagnostic PhysX"'
     GitRequired @('commit','-m','Diagnostic PhysX')
     Write-Host ''
-    Write-Host 'Commit local créé. Il reste uniquement à cliquer PUSH dans GitHub Desktop.'
-    Write-Host "Résultat : $($receipt.etat) ; essai $($receipt.tentative) ; $id."
+    Write-Host 'Commit local cree. Il reste uniquement a cliquer PUSH dans GitHub Desktop.'
+    Write-Host "Resultat : $($receipt.etat) ; essai $($receipt.tentative) ; $id."
     if($diagnosticExit -ne 0) { exit $diagnosticExit }
     exit 0
 } catch {
     Write-Host ('ERREUR : ' + $_.Exception.Message) -ForegroundColor Red
-    Write-Host 'Aucun push effectué. Vérifier les messages précédents.'
+    Write-Host 'Aucun push effectue. Verifier les messages precedents.'
     exit 30
 }
