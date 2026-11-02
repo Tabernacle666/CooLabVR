@@ -22,3 +22,7 @@
 
 ### Conditions d'acceptation
 La prochaine livraison n'est recevable que si le rendu perceptible, les phénomènes physiques réels, leur preuve instrumentée et les performances sur la RTX 5060 Ti sont présents ensemble. Le programmeur ne peut ni relâcher le masterticket, ni décaler discrètement la validation sur un comportement factice. Pas de limite de tentatives, pas de recul autorisé au programmeur.
+
+## Retour demande au moteur precedant Caca AAA
+
+Decision du proprietaire : restaurer le moteur du commit `8272389e3c0b6b4cf4f29783d9f7f5217b818e99` et interrompre le cycle `caca-aaa-001`. Code restaure par le commit `9d9413b8d4d8232742167a475d1a62973d59925d` : les huit fichiers modifies du moteur et les deux nouveaux fichiers MatterPbdCuda sont ramenes exactement a la base; cameras de diagnostic revenues aux deux vues initiales. Les outils de relais, les diagnostics et l'historique restent dans le depot. Aucun nouvel essai ne doit etre automatiquement lance. Compilation et rendu Windows apres retour non verifies.
