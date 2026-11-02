@@ -44,6 +44,8 @@ try {
 
     Write-Host '[1/4] git pull --ff-only origin main'
     GitRequired @('pull','--ff-only','origin','main')
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'CheckDiagnosticScripts.ps1')
+    if($LASTEXITCODE -ne 0) { throw 'Syntaxe PowerShell invalide apres pull ; diagnostic non lance.' }
 
     # Prevent accidentally committing an old diagnostic receipt on a failed run.
     $previousRuns = @()
