@@ -3,10 +3,10 @@
     "cycle_id":  "diagnostic-autonome",
     "billet":  "moteur-restaure",
     "tentative":  1,
-    "source_sha":  "f33d2c22e6963e7b78219398b8affc54ea7b25e2",
+    "source_sha":  "628624df182eb7d73de4a489515fb2f683777db4",
     "verification_commit_sha":  "",
-    "tested_head":  "f33d2c22e6963e7b78219398b8affc54ea7b25e2",
-    "run_id":  "20261102_140247_376_38520",
-    "manifest_path":  "diagnostics/runs/20261102_140247_376_38520/manifest.json",
+    "tested_head":  "628624df182eb7d73de4a489515fb2f683777db4",
+    "run_id":  "20261102_140940_171_18188",
+    "manifest_path":  "diagnostics/runs/20261102_140940_171_18188/manifest.json",
     "etat":  "complet"
 }
