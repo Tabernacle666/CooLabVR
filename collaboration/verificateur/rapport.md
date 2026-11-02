@@ -1,23 +1,40 @@
-# Vérification QA — matiere-pbd-001 (tentative 3)
+# Vérification QA — matiere-pbd-001 · caca-aaa-002 · tentative 1
 
-- Cycle : `caca-aaa-001`
-- Code livré et vérifié : `7a16b64087624530b666b8e7df1120be66e88f51`
-- Relais figé : `c718f99f97ebb269cd6bcf081dcf5eee2ecc6feb`
-- Base de la tentative : `f8a95243cf1440ad9c11c67615d2def3bc553669`
-- Autorisation : `fac8846703a8b7ff380db78b57bb80215b621c6a`
-- Examen : inspection statique complète du diff livré (un fichier, deux lignes corrigées), des appels et définitions PhysX concernés, de la configuration CMake, des interfaces PhysX/CUDA du projet et des exigences du masterticket.
-- **Résultat : `conforme` — destination `arch` — 0 constat.**
+- Code figé : `7be5552797c4531900f270078919e0e41c3a4846`
+- Relais de livraison : `d71cc41375fbe659979e69239a2df0768a102e37`
+- Base de comparaison : `e59e0346d2d4bd84c5a8636bff48b30ba7b47a24`
+- Autorisation du programmeur : `120b90855db8c9b638751289e4748844718f20f1`
+- Examen : inspection statique du diff source (9 fichiers), interfaces réelles PhysX épinglées par CMake, GPU CUDA/PBD, intégration HomePhysics, consommateurs shader, exigences du masterticket et rapport architectural. Aucun diagnostic/capture examiné.
+- **Résultat : `a_corriger` — destination `dev` — 2 constats.**
 
-## Examen du correctif
+## Éléments statiquement présents
 
-1. **`PxPBDParticleSystem::createPhase`** — Dans `src/core/PhysicsRuntime.cpp`, l'expression de phase humide construit désormais explicitement `PxParticlePhaseFlags(PxParticlePhaseFlag::eParticlePhaseFluid)` avant l'opérateur `|` avec `eParticlePhaseSelfCollide`. L'interface épinglée `PxPBDParticleSystem.h` attend `PxParticlePhaseFlags` et `foundation/PxFlags.h` définit `PxFlags::operator|(enumtype)` : la forme livrée est statiquement compatible. La phase sèche conserve un seul drapeau, convertible en `PxParticlePhaseFlags`.
+- Configuration réelle PhysX PBD (`PxPBDParticleSystem`, `PxParticleBuffer`, `PxPBDMaterial`), phases et positions directement accessibles en CUDA. Les appels `createPBDParticleSystem`, `createPBDMaterial`, `createParticleBuffer`, `createPhase`, `setNbActiveParticles`, `raiseFlags` concordent avec les interfaces du tag PhysX `110.1-omni-and-physx-5.9.0`.
+- Quatre profils de 262 144 à 4 194 304 particules, rendu par instances GPU aux positions PBD, champs CUDA d'humidité/température/vapeur, attraction des mouches et instrumentation GPU.
+- Conservation statique de l'essentiel des corps, contraintes et services du laboratoire dans le diff.
 
-2. **`PxPhysics::createParticleBuffer`** — L'appel est corrigé de trois arguments (`count,0,cuda`) à deux (`count,cuda`). `CMakeLists.txt` épingle précisément `NVIDIA-Omniverse/PhysX` au tag `110.1-omni-and-physx-5.9.0` ; son `physx/include/PxPhysics.h` déclare `createParticleBuffer(PxU32 maxParticles, PxCudaContextManager* cudaContextManager)`. Le nouvel appel correspond à cette signature, sans paramètre `maxVolumes`.
+## Constats imposant correction
 
-3. **Intégration conservée** — Les appels `MatterInitialize` et `MatterEvolve` dans `PhysicsRuntime.cpp` concordent avec `MatterPbdCuda.h` et `MatterPbdCuda.cu` ; `CMakeLists.txt` inclut les unités CUDA dans `Core`. Les phases, positions, vitesses et indicateurs de mise à jour continuent d'employer le véritable tampon particulaire PhysX. Le diff livré ne modifie pas les calculs d'humidité, de transport de vapeur, de rendu ou les interactions du laboratoire déjà examinés lors de la tentative précédente.
+### QA-MATIERE-001 — Croûte fissurable et interaction mécanique absentes
 
-## Limites et protocole
+**Fichiers :** `src/core/PhysicsRuntime.cpp`, `src/core/MatterPbdCuda.cu`, `labs/labovr/HomePhysics.cpp`.
 
-La présente inspection n'a exécuté ni compilation, ni jeu, ni diagnostic local et n'a consulté aucune capture. Elle ne prouve ni les performances à 72 Hz, ni les phénomènes physiques, ni l'absence de régression visible. La conformité QA autorise seulement le diagnostic local du propriétaire sur le SHA livré ; l'architecte décide ensuite, à partir des preuves, de l'acceptation ou du recul.
+**Preuve :** `ConfigureMatter` crée une phase fluide humide et une phase sèche en auto-collision mais aucune liaison/structure de surface rompable. `Environment` calcule les contacts parmi six voisins fixés par les indices initiaux, puis change de phase selon l'humidité; aucun critère d'endommagement ni rupture de croûte par impact. `HomePhysics::Build` n'instancie pas de bâton pour le contact demandé.
 
-**Aucune divergence constatée.**
+**Exigence :** le masterticket impose qu'une croûte plus rigide se forme, se fissure au contact physique d'un bâton et révèle de l'humidité interne.
+
+**Conséquence :** le séchage et la séparation de particules ne constituent pas une fracture mécanique démontrable de croûte. Ajouter le comportement physique réel sans animation de substitution.
+
+### QA-MATIERE-002 — État de sécheresse non rendu visuellement
+
+**Fichiers :** `src/core/MatterPbdCuda.cu`, `labs/labovr/HomePhysics.cpp`, `shaders/scene.hlsl`, `shaders/compute.hlsl`.
+
+**Preuve :** `MatterPack` place `dry=1-moisture[i]` dans `GpuInstance.scale.w` mais fixe `material` à la valeur initiale. `HomePhysics::Build` assigne `Material::Bark` à toutes les particules. Les shaders MeshSolid ne consomment pas `scale.w` pour distinguer humide/sec ; ses usages dans les shaders d'atmosphère/optique sont réservés aux mouches/ombres.
+
+**Exigence :** l'état de matière simulé doit produire une croûte de surface perceptible et vérifiable; ne pas confondre présence d'une valeur GPU et comportement rendu.
+
+**Conséquence :** le cœur humide et la surface sèche ne sont pas distingués par le rendu ; le dessèchement demandé n'est pas vérifiable visuellement.
+
+## Limites
+
+Inspection statique uniquement. Aucune compilation, aucun lancement, aucun casque, aucune capture ni mesure de FPS effectués par QA. Les performances, contacts et effets visuels demandent les preuves locales ultérieures du propriétaire, seulement après QA conforme. Ne pas réveiller l'architecte : le billet est renvoyé au programmeur pour correction de ces deux constats.
