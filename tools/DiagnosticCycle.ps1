@@ -55,6 +55,17 @@ try {
     }
 } catch { $relayError = $_.Exception.Message }
 if(-not $relayEligible) { throw "Diagnostic réservé à une livraison QA conforme, non modifiée. $relayError" }
+$localStatePath = Join-Path $project '.git\relay_local_status.json'
+function UpdateLocalState([string]$etat) {
+    $state = [ordered]@{
+        etat = $etat; run_id = $runId; source_sha = $relaySource
+        cycle_id = [string]$relayDelivery.cycle_id; billet = [string]$relayDelivery.billet
+        tentative = [int]$relayDelivery.tentative; verification_commit_sha = [string]$relayQaCommit
+        updated_utc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    try { $state | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $localStatePath -Encoding UTF8 } catch {}
+}
+UpdateLocalState 'demarre'
 function Note([string]$line) {
     $value = (Get-Date -Format o) + ' ' + $line
     Add-Content -LiteralPath $cycleLog -Encoding UTF8 -Value $value
@@ -251,6 +262,7 @@ try {
     $receiptPath = Join-Path $project 'collaboration\diagnostic\retour.json'
     New-Item -ItemType Directory -Path (Split-Path $receiptPath) -Force | Out-Null
     $receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $receiptPath -Encoding UTF8
+    UpdateLocalState $receipt.etat
     Note "Diagnostic receipt: $receiptPath ; user must commit and push the run and receipt together."
     Note "Result: complete=$complete jpeg=$($jpgs.Count) runtime=$gameExit; files=$runDir"
     Note 'No Git action performed. Use GitHub Desktop to commit/push diagnostics/runs.'
