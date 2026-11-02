@@ -167,6 +167,86 @@ public:
     float Velocity()const{return velocity_;}
     void Close(){if(scene_){api_->DestroyScene(api_->serviceContext,scene_);scene_=0;}}
 };
+// A diagnostic-only kinematic collider exercises contact without XR input.
+class DiagnosticHandContact {
+    const LabPhysicsServiceV1* api_{};
+    LabPhysicsSceneV1 scene_{};
+    LabPhysicsBodyV1 hand_{},oldHand_{},target_[2]{};
+    unsigned phase_{};uint64_t changedFrame_{};
+    double started_{};
+    float handX_{-.32f},baseline_{},distance_[2]{};
+    const char* reason_{"not_started"};
+    int Error(const char* reason){reason_=reason;return -1;}
+    LabPhysicsBodyDescV1 Body(bool hand,float x,float y)const{
+        LabPhysicsBodyDescV1 d{};d.structSize=sizeof(d);
+        d.kind=hand?LAB_PHYSICS_KINEMATIC:LAB_PHYSICS_DYNAMIC;
+        d.shape=LAB_PHYSICS_BOX;d.layer=hand?1u:2u;d.collisionMask=hand?2u:1u;
+        d.pose.position={x,y,0};d.pose.orientation={0,0,0,1};d.shapePose.orientation={0,0,0,1};
+        d.dimensions={.05f,.05f,.05f};d.mass=1;d.staticFriction=.6f;
+        d.dynamicFriction=.4f;d.contactOffset=.002f;d.maxAngularVelocity=100;return d;
+    }
+    bool Probes(bool includeHand){
+        LabPhysicsBodyV1 bodies[]{target_[0],target_[1],hand_};
+        return api_->SetProbes(api_->serviceContext,scene_,bodies,includeHand?3u:2u)!=0;
+    }
+public:
+    bool Start(const LabHostApiV1& host){
+        started_=QpcNowSeconds();
+        api_=static_cast<const LabPhysicsServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_PHYSICS_V1,1));
+        if(!api_){reason_="service";return false;}
+        LabPhysicsSceneDescV1 desc{sizeof(desc),8,{0,0,0},1.f/120.f,2,0};
+        if(!api_->CreateScene(api_->serviceContext,&desc,&scene_)){reason_="scene";return false;}
+        auto a=Body(false,0,0),b=Body(false,0,2),h=Body(true,handX_,0);
+        if(!api_->CreateBody(api_->serviceContext,scene_,&a,&target_[0])||
+           !api_->CreateBody(api_->serviceContext,scene_,&b,&target_[1])||
+           !api_->CreateBody(api_->serviceContext,scene_,&h,&hand_)||!Probes(true)){
+            reason_="create_bodies";return false;
+        }
+        phase_=1;reason_="waiting_first_baseline";return true;
+    }
+    int Update(uint64_t frame){
+        if(QpcNowSeconds()-started_>12.)return Error(reason_);
+        LabPhysicsStateV1 states[4]{};LabPhysicsSnapshotV1 snap{sizeof(snap),4,states};
+        if(!api_->PollSnapshot(api_->serviceContext,scene_,&snap))return 0;
+        const LabPhysicsStateV1* target{};bool handSeen=false;
+        const unsigned index=phase_<=2?0u:1u;
+        for(uint32_t i=0;i<snap.stateCount;i++){
+            if(states[i].body==target_[index])target=&states[i];
+            if(states[i].body==hand_)handSeen=true;
+        }
+        if(!target||!handSeen||snap.sourceFrame<=changedFrame_)return 0;
+        if(!std::isfinite(target->pose.position.x))return Error("nonfinite_pose");
+        if(phase_==1||phase_==3){
+            baseline_=target->pose.position.x;
+            if(std::abs(baseline_)>.02f)return Error("target_moved_before_contact");
+            ++phase_;reason_=phase_==2?"waiting_first_contact":"waiting_second_contact";
+        }
+        const float distance=target->pose.position.x-baseline_;
+        if(distance>.03f){
+            distance_[index]=distance;
+            if(index==1){reason_="ok";return 1;}
+            if(!Probes(false)||!api_->DestroyBody(api_->serviceContext,scene_,hand_))
+                return Error("remove_hand");
+            oldHand_=hand_;
+            LabPhysicsCommandV1 stale{};stale.structSize=sizeof(stale);stale.kind=LAB_PHYSICS_KINEMATIC_TARGET;
+            stale.body=oldHand_;stale.target.orientation={0,0,0,1};
+            if(api_->SubmitCommands(api_->serviceContext,scene_,&stale,1))
+                return Error("stale_hand_accepted");
+            handX_=-.32f;auto h=Body(true,handX_,2);
+            if(!api_->CreateBody(api_->serviceContext,scene_,&h,&hand_)||hand_==oldHand_||!Probes(true))
+                return Error("recreate_hand");
+            changedFrame_=frame;phase_=3;reason_="waiting_second_baseline";return 0;
+        }
+        handX_=std::min(handX_+.006f,.30f);
+        LabPhysicsCommandV1 move{};move.structSize=sizeof(move);move.kind=LAB_PHYSICS_KINEMATIC_TARGET;
+        move.body=hand_;move.target.position={handX_,index?2.f:0.f,0};move.target.orientation={0,0,0,1};
+        if(!api_->SubmitCommands(api_->serviceContext,scene_,&move,1))return Error("move_hand");
+        return 0;
+    }
+    const char* Reason()const{return reason_;}
+    float Distance(unsigned index)const{return distance_[index];}
+    void Close(){if(scene_){api_->DestroyScene(api_->serviceContext,scene_);scene_=0;}}
+};
 int RenderThread(Channels& io,const RunOptions& options) {
     wchar_t threadName[96];swprintf_s(threadName,L"%ls render",GetCoreIdentity().diagnosticLabelW);SetThreadDescription(GetCurrentThread(),threadName);ComScope com;JobSystem jobs;jobs.Start();
     const auto inputConfiguration=AssetPath(L"input.ini");
@@ -204,6 +284,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
     PopulationContinuityCheck diagnosticContinuity;
     bool diagnosticHiddenActive=false,diagnosticContinuityPassed=false;
     DiagnosticMutation diagnosticMutation;bool diagnosticMutationActive=false,diagnosticMutationPassed=false;
+    DiagnosticHandContact diagnosticHand;bool diagnosticHandActive=false,diagnosticHandPassed=false;
     uint64_t diagnosticHiddenFirstFrame=0;
     double diagnosticHiddenStarted=0.;
     StageCpu xrWaitCpu,xrBeginCpu,xrSyncCpu,xrLocateCpu,xrAcquireColorCpu,
@@ -278,6 +359,23 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 LogEvent(frame.input.frameId,"sweep.physics_mutation","result=%s reason=%s force_velocity_x=%.5f",
                     result>0?"pass":"fail",diagnosticMutation.Reason(),diagnosticMutation.Velocity());
                 diagnosticMutation.Close();diagnosticMutationActive=false;
+                if(result<0){diagnosticFailed=true;io.stop=true;}
+                else{
+                    diagnosticHandActive=diagnosticHand.Start(homeApi);
+                    if(!diagnosticHandActive){
+                        LogEvent(frame.input.frameId,"sweep.physics_hand","result=fail reason=%s",diagnosticHand.Reason());
+                        diagnosticHand.Close();diagnosticFailed=true;io.stop=true;
+                    }
+                }
+            }
+        }
+        if(diagnosticHandActive){
+            const int result=diagnosticHand.Update(frame.input.frameId);
+            if(result){
+                diagnosticHandPassed=result>0;
+                LogEvent(frame.input.frameId,"sweep.physics_hand","result=%s reason=%s first_displacement_m=%.5f second_displacement_m=%.5f",
+                    result>0?"pass":"fail",diagnosticHand.Reason(),diagnosticHand.Distance(0),diagnosticHand.Distance(1));
+                diagnosticHand.Close();diagnosticHandActive=false;
                 if(result<0)diagnosticFailed=true;
                 io.stop=true;
             }
@@ -473,7 +571,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
     }
     io.stop=true;
     if(diagnosticHiddenActive){home.SetAmbientVisible(true);diagnosticHiddenActive=false;}
-    diagnosticMutation.Close();
+    diagnosticMutation.Close();diagnosticHand.Close();
     if(diagnosticGpuActive){
         graphics.EndPerformanceCapture();
         xr.SetPerformanceCaptureActive(false);
@@ -581,7 +679,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 xrAcquireColorCpu.Average(),xrWaitColorCpu.Average(),xrAcquireDepthCpu.Average(),
                 xrWaitDepthCpu.Average(),xrEndCpu.Average());
         }
-        if(diagnosticFailed||!diagnosticContinuityPassed||!diagnosticMutationPassed||diagnosticSlot!=diagnosticViews.size())return 3;
+        if(diagnosticFailed||!diagnosticContinuityPassed||!diagnosticMutationPassed||!diagnosticHandPassed||diagnosticSlot!=diagnosticViews.size())return 3;
     }
     return options.gpuValidation&&!clean?2:0;
 }
