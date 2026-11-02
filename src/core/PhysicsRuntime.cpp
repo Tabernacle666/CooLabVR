@@ -1,4 +1,5 @@
 #include "PhysicsRuntime.h"
+#include "PhysicsDiagnostics.h"
 #include "PhysicsCuda.h"
 #include "PopulationCuda.h"
 #include "PopulationPolicy.h"
@@ -153,18 +154,7 @@ struct PhysicsRuntime::Impl {
         double frameCommandWaitMs{},frameFetchBlockingMs{},frameTopologyWaitMs{};
         uint32_t frameUntimedSteps{};
         // Compact diagnostic, counters only; no GPU queries, waits or per-frame files.
-        struct DiagnosticProfile {
-            uint64_t frames{},steps{},fetchBlocked{},droppedFrames{};
-            uint64_t deviceZeroSteps{},hostUploadSteps{};
-            uint64_t gpuStepSamples{},gpuFrameSamples{},untimedGpuSteps{};
-            uint64_t motorWrites{},motorUnchangedSkips{};
-            uint64_t fetchByOrdinal[2]{}, fetchBuckets[5]{};
-            double fetchSumByOrdinalMs[2]{}, fetchPeakByOrdinalMs[2]{}, checkResultsMs{};
-            double gpuStepSumMs{},gpuStepPeakMs{},gpuFrameSumMs{},gpuFramePeakMs{};
-            double frameCpuMs{},stepCpuMs{},maxStepCpuMs{},contextLockMs{};
-            double commandWaitMs{},fetchBlockedMs{},fetchReadyMs{},topologyWaitMs{};
-            double simulateSubmitMs{},populationSubmitMs{},postFetchCpuMs{},forceInitSubmitMs{};
-        } diagnostic;
+        PhysicsDiagnosticProfile diagnostic;
         LabGpuPublicationProviderV1 provider{};std::vector<LabU32> streamMaterials;
         Scene(Impl& r,Owner& o,LabPhysicsSceneV1 h,const LabPhysicsSceneDescV1& d):runtime(r),owner(o),handle(h),desc(d){}
         void Initialize();void Destroy();
@@ -237,58 +227,18 @@ void PhysicsRuntime::Impl::Scene::DestroyPublications(){
 }
 void PhysicsRuntime::Impl::Scene::Destroy(){
     if(SessionLogCompact()&&diagnostic.frames){
-        const auto& p=diagnostic;
-        const double invFrames=1./double(p.frames),invSteps=p.steps?1./double(p.steps):0.;
-        LogEvent(0,"physics.profile.cpu",
-            "frames=%llu steps=%llu steps_per_frame=%.3f fixed_dt_ms=%.3f max_substeps=%u dropped_frames=%llu dropped_s=%.6f frame_avg_ms=%.3f step_avg_ms=%.3f step_peak_ms=%.3f lock_avg_ms=%.3f",
-            static_cast<unsigned long long>(p.frames),static_cast<unsigned long long>(p.steps),
-            double(p.steps)*invFrames,double(desc.fixedStepSeconds)*1000.,desc.maxSubsteps,static_cast<unsigned long long>(p.droppedFrames),
-            droppedSeconds,p.frameCpuMs*invFrames,p.stepCpuMs*invSteps,p.maxStepCpuMs,p.contextLockMs*invFrames);
-        LogEvent(0,"physics.profile.wait",
-            "fetch_blocked_steps=%llu fetch_blocked_total_ms=%.3f fetch_ready_total_ms=%.3f command_wait_total_ms=%.3f topology_wait_total_ms=%.3f check_avg_ms=%.4f first_count=%llu first_avg_ms=%.3f first_peak_ms=%.3f later_count=%llu later_avg_ms=%.3f later_peak_ms=%.3f fetch_lt_0_5ms=%llu fetch_0_5_to_1ms=%llu fetch_1_to_2ms=%llu fetch_2_to_4ms=%llu fetch_ge_4ms=%llu",
-            static_cast<unsigned long long>(p.fetchBlocked),p.fetchBlockedMs,p.fetchReadyMs,p.commandWaitMs,p.topologyWaitMs,p.checkResultsMs*invSteps,
-            static_cast<unsigned long long>(p.fetchByOrdinal[0]),p.fetchByOrdinal[0]?p.fetchSumByOrdinalMs[0]/double(p.fetchByOrdinal[0]):0.,p.fetchPeakByOrdinalMs[0],
-            static_cast<unsigned long long>(p.fetchByOrdinal[1]),p.fetchByOrdinal[1]?p.fetchSumByOrdinalMs[1]/double(p.fetchByOrdinal[1]):0.,p.fetchPeakByOrdinalMs[1],
-            static_cast<unsigned long long>(p.fetchBuckets[0]),static_cast<unsigned long long>(p.fetchBuckets[1]),static_cast<unsigned long long>(p.fetchBuckets[2]),static_cast<unsigned long long>(p.fetchBuckets[3]),static_cast<unsigned long long>(p.fetchBuckets[4]));
-        LogEvent(0,"physics.profile.submit",
-            "simulate_avg_ms=%.3f population_avg_ms=%.3f post_fetch_avg_ms=%.3f",
-            p.simulateSubmitMs*invSteps,p.populationSubmitMs*invSteps,p.postFetchCpuMs*invSteps);
-        LogEvent(0,"physics.profile.motor",
-            "writes=%llu unchanged_skips=%llu total_considered=%llu",
-            static_cast<unsigned long long>(p.motorWrites),
-            static_cast<unsigned long long>(p.motorUnchangedSkips),
-            static_cast<unsigned long long>(p.motorWrites+p.motorUnchangedSkips));
+        LogPhysicsProfileCpu(diagnostic,desc.fixedStepSeconds,desc.maxSubsteps,droppedSeconds);
         const uint32_t activeJoints=uint32_t(std::count_if(joints.begin(),joints.end(),
             [](const Joint& j){return j.joint!=nullptr;}));
-        LogEvent(0,"physics.profile.solver",
-            "position_iterations=%u velocity_iterations=%u dynamic_bodies=%u joint_count=%u sleeping_disabled=%u",
-            unsigned(SolverPositionIterations),unsigned(SolverVelocityIterations),dynamicCount,
-            activeJoints,unsigned(scene->getFlags().isSet(PxSceneFlag::eDISABLE_SLEEPING)));
-        const uint64_t forceSteps=p.deviceZeroSteps+p.hostUploadSteps;
-        LogEvent(0,"physics.profile.transfer",
-            "device_zero_steps=%llu host_upload_steps=%llu active_force_steps=%llu force_init_submit_avg_ms=%.4f",
-            static_cast<unsigned long long>(p.deviceZeroSteps),
-            static_cast<unsigned long long>(p.hostUploadSteps),
-            static_cast<unsigned long long>(forceSteps),
-            forceSteps?p.forceInitSubmitMs/double(forceSteps):0.);
+        LogPhysicsProfileSolver(diagnostic,SolverPositionIterations,SolverVelocityIterations,
+                                dynamicCount,activeJoints,scene->getFlags().isSet(PxSceneFlag::eDISABLE_SLEEPING));
     }
     {PxScopedCudaLock lock(*runtime.cuda);DestroyPublications();Cuda(cudaStreamSynchronize(stream),"retire physics scene");
     cudaFreeHost(forceHost);cudaFreeHost(torqueHost);cudaFreeHost(editPoseHost);cudaFreeHost(editIndexHost);cudaFree(editPoseDevice);cudaFree(editIndexDevice);cudaFree(editZeroDevice);
     if(insects)cudaFree(insects);cudaFree(populationBodies);if(populationBodyPoses)cudaFree(populationBodyPoses);if(populationGrid)cudaFree(populationGrid);cudaFree(populationSummary);for(auto& r:populationReadbacks){cudaFreeHost(r.host);cudaEventDestroy(r.done);}
     for(auto& p:probeSlots){cudaFreeHost(p.host);cudaFreeHost(p.overflow);cudaEventDestroy(p.done);cudaEventDestroy(p.gpuBegin);cudaEventDestroy(p.gpuEnd);}
     CollectTimings();
-    if(SessionLogCompact()&&diagnostic.frames){
-        const auto& p=diagnostic;
-        LogEvent(0,"physics.profile.gpu",
-            "step_samples=%llu step_untimed=%llu step_avg_span_ms=%.3f step_peak_span_ms=%.3f frame_samples=%llu frame_avg_span_ms=%.3f frame_peak_span_ms=%.3f",
-            static_cast<unsigned long long>(p.gpuStepSamples),
-            static_cast<unsigned long long>(p.untimedGpuSteps),
-            p.gpuStepSamples?p.gpuStepSumMs/double(p.gpuStepSamples):0.,
-            p.gpuStepPeakMs,
-            static_cast<unsigned long long>(p.gpuFrameSamples),
-            p.gpuFrameSamples?p.gpuFrameSumMs/double(p.gpuFrameSamples):0.,
-            p.gpuFramePeakMs);
-    }
+    if(SessionLogCompact()&&diagnostic.frames)LogPhysicsProfileGpu(diagnostic);
     for(auto pool:{std::span<Timing>(timings),std::span<Timing>(stepTimings),std::span<Timing>(publicationTimings)})for(auto& t:pool){cudaEventDestroy(t.begin);cudaEventDestroy(t.end);}
     for(void* p:{static_cast<void*>(airflowDevice),static_cast<void*>(dragDevice),static_cast<void*>(indices),static_cast<void*>(previous),static_cast<void*>(current),static_cast<void*>(velocity),static_cast<void*>(angular),static_cast<void*>(forces),static_cast<void*>(torques),static_cast<void*>(visualDevice),static_cast<void*>(lightDevice),static_cast<void*>(aeroDevice),static_cast<void*>(probeDevice),static_cast<void*>(actorDevice),static_cast<void*>(contacts),static_cast<void*>(contactCount),static_cast<void*>(probeOutput)})if(p)cudaFree(p);
     for(auto e:{uploadReady,poseReady,velocityReady,stateReady,forceReady,forceDone,torqueDone,contactReady})if(e)cuEventDestroy(e);if(stream)cudaStreamDestroy(stream);}
