@@ -1,12 +1,12 @@
 ﻿{
     "schema_version":  1,
-    "cycle_id":  "caca-aaa-002",
-    "billet":  "matiere-pbd-001",
-    "tentative":  2,
-    "source_sha":  "0da8d4cdfd0928af2fde0b1e92308a0c8ae7ff99",
-    "verification_commit_sha":  "a909c923f748fcea0ce08eb723e9513d919aa0e7",
-    "tested_head":  "a909c923f748fcea0ce08eb723e9513d919aa0e7",
-    "run_id":  "20261102_071132_839_10952",
-    "manifest_path":  "diagnostics/runs/20261102_071132_839_10952/manifest.json",
-    "etat":  "echec_execution"
+    "cycle_id":  "diagnostic-autonome",
+    "billet":  "moteur-restaure",
+    "tentative":  1,
+    "source_sha":  "0cb6c49546e415a604fd04e5de61b2e5bf551e3e",
+    "verification_commit_sha":  "",
+    "tested_head":  "0cb6c49546e415a604fd04e5de61b2e5bf551e3e",
+    "run_id":  "20261102_073029_820_18996",
+    "manifest_path":  "diagnostics/runs/20261102_073029_820_18996/manifest.json",
+    "etat":  "complet"
 }
