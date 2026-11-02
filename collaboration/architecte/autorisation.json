@@ -3,12 +3,28 @@
   "role": "arch",
   "cycle_id": "caca-aaa-001",
   "billet": "matiere-pbd-001",
-  "source_sha": "8272389e3c0b6b4cf4f29783d9f7f5217b818e99",
+  "source_sha": "7a16b64087624530b666b8e7df1120be66e88f51",
   "branche_source": "main",
   "etat": "termine",
   "ferme": true,
-  "decision": "continuer",
-  "tentative": 1,
+  "decision": "corriger",
+  "tentative": 4,
+  "diagnostic_commit_sha": "8f6d33964f75e63baccdadb7d11371a4d42b4deb",
+  "verification_commit_sha": "8447f3771991f707c0603d1624820a52d46fb203",
   "masterticket": "collaboration/architecte/masterticket.md",
-  "motif": "Amorçage autorisé : implémenter les exigences PhysX GPU PBD et CUDA du masterticket. QA statique avant diagnostic réel; aucune acceptation fonctionnelle anticipée."
+  "rapport": "collaboration/architecte/rapport.md",
+  "motif": "Tentative 3 REFUSEE : aucune matiere fecale visible sur six JPG, PBD 262144 particules ~25.3 ms/sous-pas et ~50.5 ms/image contre ~3.7 et ~6.3 ms de reference, 611 frames physiques en retard ; aucune preuve d'adhesion, de fracture ou de transport de vapeur.",
+  "correctif": {
+    "performance": "Localiser le cout PhysX PBD reel (sous-pas, iterations, contacts entre particules, synchronisations CUDA/fetchResults et buffers) par profil comparatif sans PBD / 262144 / 1048576 / 2097152 / 4194304. Ne pas reduire silencieusement la population, ni desactiver la physique. Objectif VR 72 Hz a demontrer avec FPS effectif/potentiel, temps CPU/GPU, frame-time, VRAM, sous-pas et images sautees. Ne pas changer de moteur ni simuler sur CPU.",
+    "visibilite": "Placer la matiere sur une zone LIBRE de la table, hors emprise du pied du ventilateur, dans au moins deux angles cameras non occultes. Prouver au diagnostic positions PhysX, particules actives, nombre d'instances publiees, nombre d'instances visibles et les materiaux observes. Les micro-spheres individuelles de 3.8 mm ne sont pas une surface continue; construire un rendu GPU fidele aux vraies particules sans blob factice.",
+    "comportement": "Conserver tous les objets et fonctions du labo. Demontrer par interactions PhysX reelles la deformation, la table retournee avec adhesion partielle et chute, sechage/fissure sous contrainte, vapeur liee a humidite/chaleur et redistribution des mouches selon champs; aucun declencheur ad hoc ni mouvement impose.",
+    "diagnostic": "Le diagnostic actuel montre six angles d'une table immobile : il n'a teste aucun des comportements exiges. Ajouter un parcours reproductible de vrais etats/interactions physiques avec JPG avant/apres et mesures quantifiees; afficher le comptage PBD, contacts, zones humides et seches, VRAM et cout solveur. Toute limitation non verifiee reste explicitement non conforme."
+  },
+  "interdictions": [
+    "Accepter sous pretexte que ca compile",
+    "Remplacer PhysX par quelques blobs rigides ou un script de collage",
+    "Masquer le cout en supprimant des particules, des collisions ou des sous-pas sans accord",
+    "Falsifier les mesures ou qualifier de 72 Hz une execution a ~20 FPS",
+    "Reculer du code : cette decision appartient uniquement a l'architecte"
+  ]
 }
