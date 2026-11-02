@@ -41,7 +41,7 @@ void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
     input_=static_cast<const LabInputServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_INPUT_V1,1));
     audio_=static_cast<const LabAudioServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_AUDIO_V1,1));
     gpu_=static_cast<const LabGpuServiceV1*>(host.QueryService(host.hostContext,LABOVR_SERVICE_GPU_V1,1));
-    if(!storage_||storage_->structSize<sizeof(*storage_)||!physics_||physics_->version!=1||physics_->structSize<sizeof(*physics_)||!physics_->CreatePopulation||!physics_->PollPopulation||!physics_->SetPopulationEffects||!physics_->SetPopulationHands||!physics_->SetBodyCollisionEnabled||!physics_->SetBodySpeculativeCCD||!input_||input_->structSize<sizeof(*input_)||!input_->GetPhysicalSources||!input_->SetBooleanSources||!audio_||audio_->structSize<sizeof(*audio_)||!audio_->SetAcousticBoxes||!gpu_||gpu_->structSize<sizeof(*gpu_)||!gpu_->SetFogSettings||!gpu_->SetFogInput||!gpu_->SetPopulationOpticalSettings||!gpu_->RequestCapture||!gpu_->GetCaptureStatus||!gpu_->SetAntialiasing||!gpu_->SetFogTransport||!gpu_->SetSurfaceSettings||!gpu_->SetMultisampling||!physics_->SetAirflows||!physics_->SetPopulationSpace||!physics_->CreateMatter)Fail("Home requires SDK physics_v1/input_v1/audio_v1/gpu_v1");
+    if(!storage_||storage_->structSize<sizeof(*storage_)||!physics_||physics_->version!=1||physics_->structSize<sizeof(*physics_)||!physics_->CreatePopulation||!physics_->PollPopulation||!physics_->SetPopulationEffects||!physics_->SetPopulationHands||!physics_->SetBodyCollisionEnabled||!physics_->SetBodySpeculativeCCD||!input_||input_->structSize<sizeof(*input_)||!input_->GetPhysicalSources||!input_->SetBooleanSources||!audio_||audio_->structSize<sizeof(*audio_)||!audio_->SetAcousticBoxes||!gpu_||gpu_->structSize<sizeof(*gpu_)||!gpu_->SetFogSettings||!gpu_->SetFogInput||!gpu_->SetPopulationOpticalSettings||!gpu_->RequestCapture||!gpu_->GetCaptureStatus||!gpu_->SetAntialiasing||!gpu_->SetFogTransport||!gpu_->SetSurfaceSettings||!gpu_->SetMultisampling||!physics_->SetAirflows||!physics_->SetPopulationSpace)Fail("Home requires SDK physics_v1/input_v1/audio_v1/gpu_v1");
     // Bound GPU PhysX synchronization to at most two fixed steps per rendered
     // frame. An 8 x 240 Hz catch-up loop can amplify frame overruns: each
     // substep blocks on fetchResults(), then the next frame tries to catch up.
@@ -63,7 +63,7 @@ void HomePhysics::Load(const LabHostApiV1& host,SceneData& assets){
 void HomePhysics::Unload(){
     if(!scene_)return;auto opticalOff=optical_;opticalOff.enabled=0;gpu_->SetPopulationOpticalSettings(gpu_->serviceContext,&opticalOff);audio_->SetAcousticBoxes(audio_->serviceContext,nullptr,0);auto off=fog_;off.enabled=0;Require(gpu_->SetFogSettings(gpu_->serviceContext,&off),"Home gpu_v1: volume detach rejected");Require(gpu_->SetPublicationProvider(gpu_->serviceContext,nullptr),"Home gpu_v1: detach failed");
     LabAudioEmitterBatchV1 silence{1,sizeof(silence),0,nullptr,0,0};Require(audio_->PublishEmitters(audio_->serviceContext,&silence),"Home audio_v1: emitter detach failed");Require(physics_->DestroyScene(physics_->serviceContext,scene_),"Home physics_v1: scene destruction failed");
-    entities_.clear();connections_.clear();selections_.clear();scene_=0;fanBodies_={};fanCcd_=false;vaseBase_=0;rockBodies_={};hands_={};grips_={};handTracked_={};handColliding_={};provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
+    entities_.clear();connections_.clear();selections_.clear();scene_=0;fanBodies_={};fanCcd_=false;vaseBase_=bonsaiBody_=0;rockBodies_={};hands_={};grips_={};handTracked_={};handColliding_={};provider_={};visuals_.clear();physics_=nullptr;input_=nullptr;audio_=nullptr;gpu_=nullptr;
 }
 void HomePhysics::SetVisible(bool visible){
     visible_=visible;PublishAcoustics();PublishOptical();
@@ -111,11 +111,11 @@ void HomePhysics::Build(SceneData& assets){
     const char* roomIds[]{"room-floor","room-ceiling","room-zminus","room-xminus","room-xplus"};
     const char* furnitureIds[]{"table-top","table-leg-1","table-leg-2","table-leg-3","table-leg-4"};
     const char* furnitureNames[]{"Table top","Table leg 1","Table leg 2","Table leg 3","Table leg 4"};
-    uint32_t ordinal=0;LabPhysicsBodyV1 tableTop{};XMFLOAT3 tableOrigin{};float tableHalfHeight{};
+    uint32_t ordinal=0;LabPhysicsBodyV1 tableTop{};XMFLOAT3 tableOrigin{};
     for(const auto& object:assets.objects){buildingGroup_=ordinal<5?0:1;
         auto d=Description(ordinal<5?LAB_PHYSICS_STATIC:LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_BOX,object.current.p,Scale(object.scale,.5f),ordinal<5?0.f:(ordinal==5?8.f:1.f),RoomLayer);d.collisionGroup=ordinal<5?0x400u:0x300u;auto body=Body(d);
         entities_.back().id=ordinal<5?roomIds[ordinal]:furnitureIds[ordinal-5];entities_.back().name=ordinal<5?roomNames[ordinal]:furnitureNames[ordinal-5];entities_.back().acousticHalfExtent=d.dimensions;
-        if(ordinal==5){tableTop=body;tableOrigin=object.current.p;tableHalfHeight=object.scale.y*.5f;}
+        if(ordinal==5){tableTop=body;tableOrigin=object.current.p;}
         else if(ordinal>5)Joint(Connection(tableTop,body,PoseAt(Sub(object.current.p,tableOrigin)),PoseAt({0,0,0}),false));
         Visual(body,object.mesh,Material(object.material),object.scale,PoseAt({0,0,0}),object.flags);++ordinal;
     }
@@ -222,6 +222,18 @@ void HomePhysics::Build(SceneData& assets){
         auto body=Body(rock);rockBodies_[i]=body;entities_.back().id="vase-rock-"+std::to_string(i);entities_.back().name="Grey rock "+std::to_string(i+1);
         Visual(body,Rock,Material::Rock,{width,.011f,depth});
     }
+    buildingGroup_=7;
+    auto tree=Description(LAB_PHYSICS_DYNAMIC,LAB_PHYSICS_SPHERE,{potOrigin.x,1.225f,potOrigin.z},{.030f,0,0},.0007f,RoomLayer);
+    tree.staticFriction=.85f;tree.angularDamping=.30f;
+    auto bonsai=Body(tree);bonsaiBody_=bonsai;entities_.back().id="vase-bonsai";entities_.back().name="Bonsai tree";
+    Visual(bonsai,uint32_t(Mesh::Sphere),Material::Bark,{.060f,.060f,.060f});
+    Visual(bonsai,uint32_t(Mesh::Cylinder),Material::Bark,{.019f,.22f,.019f},PoseAt({0,.095f,0}));
+    for(uint32_t i=0;i<5;i++){
+        float a=XM_2PI*float(i)/5.f;XMFLOAT3 branch{.055f*std::cos(a),.18f+.025f*float(i%2),.055f*std::sin(a)};
+        Visual(bonsai,uint32_t(Mesh::Cylinder),Material::Bark,{.012f,.10f,.012f},PoseAt(Scale(branch,.5f),Rotation(0,a,-.65f)));
+        Visual(bonsai,uint32_t(Mesh::Sphere),Material::Leaves,{.075f,.045f,.070f},PoseAt(branch));
+    }
+    Visual(bonsai,uint32_t(Mesh::Sphere),Material::Leaves,{.065f,.075f,.065f},PoseAt({0,.25f,0}));
     // IDs of constraints refer to their declared body relation, not allocation order.
     buildingGroup_=0;
     optical_.lightIndex=lampLight_.sceneLightIndex;
@@ -236,34 +248,6 @@ void HomePhysics::Build(SceneData& assets){
     Require(physics_->SetPopulationSpace(physics_->serviceContext,scene_,&populationSpace_),"Home physics_v1: flight volume rejected");
     Require(physics_->SetPopulationEffects(physics_->serviceContext,scene_,&effects_),"Home physics_v1: population effects rejected");
     flight_.impactSeconds=effects_.fleeSeconds;fog_.lightIndex=lampLight_.sceneLightIndex;Require(gpu_->SetFogSettings(gpu_->serviceContext,&fog_),"Home gpu_v1: volume settings rejected");
-    // Matter is a PhysX GPU PBD volume with true particle/rigid contacts.
-    // Do not attach it to the table: adhesion and gravity alone determine how
-    // much remains when the table rotates or the material breaks apart.
-    uint32_t matterCount=262144u;
-    if(const char* profile=std::getenv("COOLAB_MATTER_PARTICLES")){
-        const unsigned long requested=std::strtoul(profile,nullptr,10);
-        if(requested==0ul||requested==262144ul||requested==1048576ul||
-           requested==2097152ul||requested==4194304ul)
-            matterCount=uint32_t(requested);
-    }
-    if(!matterCount){
-        LogEvent(0,"home.matter","particles=0 mode=explicit_no_pbd_comparison");
-        return;
-    }
-    const uint32_t matterSide=matterCount==262144u?128u:
-        matterCount==4194304u?256u:192u;
-    const uint32_t levels=(matterCount+matterSide*matterSide-1)/
-        (matterSide*matterSide);
-    const float matterRadius=.245f/float(matterSide);
-    LabPhysicsMatterDescV1 matter{sizeof(matter),matterCount,
-        uint32_t(Mesh::Sphere),uint32_t(Material::Bark),
-        {tableOrigin.x-.49f,tableOrigin.y+tableHalfHeight+
-            matterRadius*(float(levels)+1.f),tableOrigin.z},
-        matterRadius,1050.f};
-    Require(physics_->CreateMatter(physics_->serviceContext,scene_,&matter),
-        "Home PhysX GPU PBD matter creation rejected");
-    LogEvent(0,"home.matter","particles=%u center=%.4f,%.4f,%.4f radius=%.6f mode=PhysX_GPU_PBD",
-        matterCount,matter.center.x,matter.center.y,matter.center.z,matterRadius);
 }
 void HomePhysics::ApplyDiagnosticDefaults(){
     if(!scene_)Fail("Diagnostic defaults require an active Home scene");
@@ -466,7 +450,8 @@ void HomePhysics::Update(uint64_t frame,double now,std::span<const SceneLight> a
         if(base!=states_.begin()+stateCount_)LogEvent(frame,"home.mechanisms","frozen=%u fan_enabled=%u set_rpm=%.1f actual_rpm=%.1f base_xyz=%.4f,%.4f,%.4f base_v=%.4f,%.4f,%.4f rotor_xyz=%.4f,%.4f,%.4f rotor_q=%.4f,%.4f,%.4f,%.4f grip_l=%u grip_r=%u lamp=%u",
             unsigned(frozen_),unsigned(fanEnabled_),fanRpm_,fanActualRpm_,base->pose.position.x,base->pose.position.y,base->pose.position.z,base->linearVelocity.x,base->linearVelocity.y,base->linearVelocity.z,rotor.pose.position.x,rotor.pose.position.y,rotor.pose.position.z,q.x,q.y,q.z,q.w,unsigned(grips_[0]!=0),unsigned(grips_[1]!=0),unsigned(LampEnabled()));
         auto vase=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==vaseBase_;});
-        if(vase!=states_.begin()+stateCount_){
+        auto tree=std::find_if(states_.begin(),states_.begin()+stateCount_,[&](const auto& s){return s.body==bonsaiBody_;});
+        if(vase!=states_.begin()+stateCount_&&tree!=states_.begin()+stateCount_){
             auto orientation=vase->pose.orientation;
             LabQuatV1 inverse{-orientation.x,-orientation.y,-orientation.z,orientation.w};
             uint32_t inside=0;
@@ -474,9 +459,9 @@ void HomePhysics::Update(uint64_t frame,double now,std::span<const SceneLight> a
                 auto local=Rotated(Sub(V(s.pose.position),V(vase->pose.position)),inverse);
                 if(local.x*local.x+local.z*local.z<.09f*.09f&&local.y>-.01f&&local.y<.19f)++inside;
             }
-            LogEvent(frame,"home.vase","base_xyz=%.4f,%.4f,%.4f up=%.3f rocks_inside=%u",
-                vase->pose.position.x,vase->pose.position.y,vase->pose.position.z,
-                Rotated({0,1,0},orientation).y,inside);
+            LogEvent(frame,"home.vase","base_xyz=%.4f,%.4f,%.4f up=%.3f tree_xyz=%.4f,%.4f,%.4f rocks_inside=%u",
+                vase->pose.position.x,vase->pose.position.y,vase->pose.position.z,Rotated({0,1,0},orientation).y,
+                tree->pose.position.x,tree->pose.position.y,tree->pose.position.z,inside);
         }
     }
     bool sampled=sourceFrame_&&sourceFrame_<=frame&&frame-sourceFrame_<6;

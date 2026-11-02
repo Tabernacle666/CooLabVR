@@ -78,7 +78,7 @@ std::vector<DiagnosticView> LoadDiagnosticViews(const std::wstring& fileName){
         if(Length(Sub(view.target,view.position))<.1f)Fail("Diagnostic camera target too close");
         views.push_back(view);
     }
-    if(views.size()<2||views.size()>12)Fail("Diagnostic CSV requires 2 to 12 viewpoints");
+    if(views.size()!=2)Fail("Diagnostic CSV requires exactly two viewpoints");
     return views;
 }
 class HostGpuStream final:public GpuStream {
