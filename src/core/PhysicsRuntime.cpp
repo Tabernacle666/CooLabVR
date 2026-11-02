@@ -1,6 +1,7 @@
 #include "PhysicsRuntime.h"
 #include "PhysicsCuda.h"
 #include "PopulationCuda.h"
+#include "MatterPbdCuda.h"
 #include "PopulationPolicy.h"
 #include "Core.h"
 #include "SessionLog.h"
@@ -112,6 +113,14 @@ struct PhysicsRuntime::Impl {
         Impl& runtime;Owner& owner;LabPhysicsSceneV1 handle{};LabPhysicsSceneDescV1 desc{};PxScene* scene{};
         cudaStream_t stream{};CUevent uploadReady{},poseReady{},velocityReady{},stateReady{},forceReady{},forceDone{},torqueDone{},contactReady{};
         PxRigidDynamicGPUIndex* indices{};PxTransform *previous{},*current{};PxVec3 *velocity{},*angular{},*forces{},*torques{};
+        PxPBDParticleSystem* matterSystem{};
+        PxParticleBuffer* matterBuffer{};
+        PxPBDMaterial* matterWet{},*matterDry{};
+        PxU32 matterWetPhase{},matterDryPhase{};
+        LabPhysicsMatterDescV1 matterDesc{};
+        float* matterMoisture{},*matterTemperature{};
+        uint32_t matterSide{};
+        uint32_t ConfigureMatter(const LabPhysicsMatterDescV1&);
         LabPopulationEffectsV1 populationEffects{sizeof(LabPopulationEffectsV1),0,.18f,1.f,12.f,1.3f,.55f,.7f,.35f};
         LabPopulationHandsV1 populationHands{sizeof(LabPopulationHandsV1)};
         LabPopulationDescV1 population{};LabPopulationInputV1 populationInput{sizeof(LabPopulationInputV1),1};
@@ -274,6 +283,8 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
     }
     {PxScopedCudaLock lock(*runtime.cuda);DestroyPublications();Cuda(cudaStreamSynchronize(stream),"retire physics scene");
     cudaFreeHost(forceHost);cudaFreeHost(torqueHost);cudaFreeHost(editPoseHost);cudaFreeHost(editIndexHost);cudaFree(editPoseDevice);cudaFree(editIndexDevice);cudaFree(editZeroDevice);
+    if(matterMoisture)cudaFree(matterMoisture);
+    if(matterTemperature)cudaFree(matterTemperature);
     if(insects)cudaFree(insects);cudaFree(populationBodies);if(populationBodyPoses)cudaFree(populationBodyPoses);if(populationGrid)cudaFree(populationGrid);cudaFree(populationSummary);for(auto& r:populationReadbacks){cudaFreeHost(r.host);cudaEventDestroy(r.done);}
     for(auto& p:probeSlots){cudaFreeHost(p.host);cudaFreeHost(p.overflow);cudaEventDestroy(p.done);cudaEventDestroy(p.gpuBegin);cudaEventDestroy(p.gpuEnd);}
     CollectTimings();
@@ -292,6 +303,11 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
     for(auto pool:{std::span<Timing>(timings),std::span<Timing>(stepTimings),std::span<Timing>(publicationTimings)})for(auto& t:pool){cudaEventDestroy(t.begin);cudaEventDestroy(t.end);}
     for(void* p:{static_cast<void*>(airflowDevice),static_cast<void*>(dragDevice),static_cast<void*>(indices),static_cast<void*>(previous),static_cast<void*>(current),static_cast<void*>(velocity),static_cast<void*>(angular),static_cast<void*>(forces),static_cast<void*>(torques),static_cast<void*>(visualDevice),static_cast<void*>(lightDevice),static_cast<void*>(aeroDevice),static_cast<void*>(probeDevice),static_cast<void*>(actorDevice),static_cast<void*>(contacts),static_cast<void*>(contactCount),static_cast<void*>(probeOutput)})if(p)cudaFree(p);
     for(auto e:{uploadReady,poseReady,velocityReady,stateReady,forceReady,forceDone,torqueDone,contactReady})if(e)cuEventDestroy(e);if(stream)cudaStreamDestroy(stream);}
+    if(matterSystem){if(matterBuffer)matterSystem->removeParticleBuffer(matterBuffer);
+        matterSystem->release();matterSystem=nullptr;}
+    if(matterBuffer){matterBuffer->release();matterBuffer=nullptr;}
+    if(matterWet){matterWet->release();matterWet=nullptr;}
+    if(matterDry){matterDry->release();matterDry=nullptr;}
     for(auto& j:joints)if(j.joint)j.joint->release();
     for(auto& b:bodies){if(b.actor)b.actor->release();if(b.material)b.material->release();if(b.convex)b.convex->release();}
     if(scene)scene->release();scene=nullptr;
@@ -568,9 +584,20 @@ void PhysicsRuntime::Impl::Scene::Step(float targetFraction,uint32_t stepOrdinal
     // or direct-GPU state query. Keep that required rendezvous explicit; do not
     // request the blocking path when checkResults already establishes readiness.
     Gpu(scene->fetchResults(!resultsReady,&error)&&error==0,"PhysX GPU simulation failed; no CPU fallback allowed");
+    if(matterSystem)scene->fetchResultsParticleSystem();
     double fetchMs=(QpcNowSeconds()-fetchBegin)*1000;runtime.Check();
     const double postFetchBegin=SessionLogCompact()?QpcNowSeconds():0.;
-    if(rebuild)RefreshIndices();if(descriptorsDirty)RefreshDescriptors();ReadState(!started||rebuild);started=true;++tick;simulationTime+=desc.fixedStepSeconds;
+    if(rebuild)RefreshIndices();if(descriptorsDirty)RefreshDescriptors();ReadState(!started||rebuild);
+    if(matterSystem){
+        MatterEvolve(stream,matterBuffer->getPositionInvMasses(),matterBuffer->getVelocities(),
+            matterBuffer->getPhases(),matterMoisture,matterTemperature,
+            matterDesc.particleCount,matterWetPhase,matterDryPhase,
+            lightDevice,uint32_t(lightHost.size()),current,airflowDevice,
+            uint32_t(airflowHost.size()),angular,desc.fixedStepSeconds,float(simulationTime));
+        Cuda(cudaGetLastError(),"evolve GPU PBD humidity and temperature");
+        matterBuffer->raiseFlags(PxParticleBufferFlag::eUPDATE_PHASE);
+    }
+    started=true;++tick;simulationTime+=desc.fixedStepSeconds;
     const double postFetchMs=postFetchBegin>0?(QpcNowSeconds()-postFetchBegin)*1000.:0.;
     if(timing)Cuda(cudaEventRecord(timing->end,stream),"end physical fixed-step GPU span");
     frameCommandWaitMs+=commandWaitMs;frameFetchBlockingMs+=resultsReady?0:fetchMs;frameTopologyWaitMs+=topologyWaitMs;
@@ -641,7 +668,7 @@ uint32_t PhysicsRuntime::Impl::Scene::SetVisuals(const LabPhysicsVisualV1* v,uin
     for(uint32_t i=0;i<n;i++)if(v[i].structSize<sizeof(*v)||!FindBody(v[i].body)||v[i].mesh>=ConsoleSpec::MaxMeshes||v[i].material>=ConsoleSpec::MaxMaterials||!Valid(v[i].localPose)||!Valid(v[i].scale)||!Finite(v[i].boundingRadius)||v[i].boundingRadius<=0)return 0;
     for(uint32_t i=0;i<nl;i++)if(l[i].structSize<sizeof(*l)||!FindBody(l[i].body)||l[i].sceneLightIndex>=ConsoleSpec::MaxLights||!Valid(l[i].localPosition)||!Valid(l[i].localDirection)||!Valid(l[i].color)||!Finite(l[i].radius)||l[i].radius<=0||!Finite(l[i].power)||l[i].power<0||!Finite(l[i].outerCos)||!Finite(l[i].innerCos)||l[i].outerCos<-1||l[i].outerCos>1||l[i].innerCos<l[i].outerCos||l[i].innerCos>1)return 0;
     PxScopedCudaLock lock(*runtime.cuda);
-    uint32_t publicationCapacity=n+(insectCapacity?insectCapacity+4*LAB_PHYSICS_POPULATION_DETAIL_MAX_V1+LAB_POPULATION_SHADOW_MAX_V1:0);
+    uint32_t publicationCapacity=n+(insectCapacity?insectCapacity+4*LAB_PHYSICS_POPULATION_DETAIL_MAX_V1+LAB_POPULATION_SHADOW_MAX_V1:0)+matterDesc.particleCount;
     bool sameLayout=n==visuals.size()&&nl==lights.size()&&!slots[0].refs.empty()&&slots[0].instances.bytes==uint64_t(publicationCapacity)*sizeof(GpuInstance);
     for(uint32_t i=0;i<nl&&sameLayout;i++)sameLayout=lights[i].sceneLightIndex==l[i].sceneLightIndex;
     for(uint32_t i=0;i<n&&sameLayout;i++)sameLayout=std::find(streamMaterials.begin(),streamMaterials.end(),v[i].material)!=streamMaterials.end();
@@ -654,6 +681,8 @@ uint32_t PhysicsRuntime::Impl::Scene::SetVisuals(const LabPhysicsVisualV1* v,uin
     DestroyPublications();visuals.clear();lights.clear();if(n)visuals.assign(v,v+n);if(nl)lights.assign(l,l+nl);streamMaterials.clear();
     for(const auto& x:visuals)if(std::find(streamMaterials.begin(),streamMaterials.end(),x.material)==streamMaterials.end())streamMaterials.push_back(x.material);
     if(insectCapacity)for(auto mat:{population.bodyMaterial,population.headMaterial,population.wingMaterial})if(std::find(streamMaterials.begin(),streamMaterials.end(),mat)==streamMaterials.end())streamMaterials.push_back(mat);
+    if(matterSystem&&std::find(streamMaterials.begin(),streamMaterials.end(),matterDesc.material)==streamMaterials.end())
+        streamMaterials.push_back(matterDesc.material);
     provider.streamMaterials=streamMaterials.data();provider.streamMaterialCount=uint32_t(streamMaterials.size());
     if(publicationCapacity)for(auto& s:slots){s.instances.Create(owner.interop,uint64_t(publicationCapacity)*sizeof(GpuInstance));s.control.Create(owner.interop,48);if(nl)s.lighting.Create(owner.interop,uint64_t(nl)*sizeof(PhysicsGpuLight));s.producer.Create(owner.interop);s.consumer.Create(owner.interop);
         auto ref=[&](uint32_t binding,const SharedBuffer& buffer,uint64_t offset,uint64_t bytes){LabGpuResourceRefV1 r{};r.binding=binding;r.kind=LABOVR_GPU_RESOURCE_BUFFER_V1;r.resourceHandle=buffer.handle;r.bytes=bytes;r.offset=offset;r.generation=handle;r.initialLayout=uint32_t(D3D12_BARRIER_LAYOUT_COMMON);s.refs.push_back(r);};
@@ -688,7 +717,16 @@ uint32_t PhysicsRuntime::Impl::Scene::Acquire(LabGpuPublicationV1* out){
     s.consumer.Wait(stream,s.value);
     if(waitTiming)Cuda(cudaEventRecord(waitTiming->end,stream),"end GPU publication consumer wait");
     PhysicsPackVisuals(stream,visualDevice,uint32_t(visualHost.size()),lightDevice,uint32_t(lightHost.size()),previous,current,alpha,visible,static_cast<GpuInstance*>(s.instances.pointer),static_cast<uint32_t*>(s.control.pointer),static_cast<PhysicsGpuLight*>(s.lighting.pointer));Cuda(cudaGetLastError(),"pack GPU physical visuals");
-    if(insectCapacity){s.refs[0].bytes=(uint64_t(visualHost.size())+insectCount+4*LAB_PHYSICS_POPULATION_DETAIL_MAX_V1+LAB_POPULATION_SHADOW_MAX_V1)*sizeof(GpuInstance);PopulationPack(stream,insects,insectCount,insectCapacity,population,populationInput,populationEffects,populationBodies,populationBodyPoses,uint32_t(populationBodyHost.size()),lightDevice,uint32_t(lightHost.size()),started?current:nullptr,visible,static_cast<GpuInstance*>(s.instances.pointer),static_cast<uint32_t*>(s.control.pointer),uint32_t(visualHost.size()),populationSummary,frame,tick,float(std::clamp((insectAccumulator+accumulator)*120.,0.,1.)),float(populationSeconds));Cuda(cudaGetLastError(),"pack compact GPU population");for(auto& ref:s.refs){if(ref.binding==LAB_POPULATION_SHADOW_BINDING_V1)ref.offset=(uint64_t(visualHost.size())+insectCount+4*LAB_PHYSICS_POPULATION_DETAIL_MAX_V1)*sizeof(GpuInstance);if(ref.binding==LAB_POPULATION_PROXY_BINDING_V1||ref.binding==LAB_POPULATION_OPTICAL_BINDING_V1){ref.offset=uint64_t(visualHost.size())*sizeof(GpuInstance);ref.bytes=uint64_t(std::max(1u,insectCount))*sizeof(GpuInstance);ref.flags=insectCount?0:1;}}QueuePopulationReadback();}
+    if(insectCapacity){s.refs[0].bytes=(uint64_t(visualHost.size())+insectCount+4*LAB_PHYSICS_POPULATION_DETAIL_MAX_V1+LAB_POPULATION_SHADOW_MAX_V1+matterDesc.particleCount)*sizeof(GpuInstance);PopulationPack(stream,insects,insectCount,insectCapacity,population,populationInput,populationEffects,populationBodies,populationBodyPoses,uint32_t(populationBodyHost.size()),lightDevice,uint32_t(lightHost.size()),started?current:nullptr,visible,static_cast<GpuInstance*>(s.instances.pointer),static_cast<uint32_t*>(s.control.pointer),uint32_t(visualHost.size()),populationSummary,frame,tick,float(std::clamp((insectAccumulator+accumulator)*120.,0.,1.)),float(populationSeconds));Cuda(cudaGetLastError(),"pack compact GPU population");for(auto& ref:s.refs){if(ref.binding==LAB_POPULATION_SHADOW_BINDING_V1)ref.offset=(uint64_t(visualHost.size())+insectCount+4*LAB_PHYSICS_POPULATION_DETAIL_MAX_V1)*sizeof(GpuInstance);if(ref.binding==LAB_POPULATION_PROXY_BINDING_V1||ref.binding==LAB_POPULATION_OPTICAL_BINDING_V1){ref.offset=uint64_t(visualHost.size())*sizeof(GpuInstance);ref.bytes=uint64_t(std::max(1u,insectCount))*sizeof(GpuInstance);ref.flags=insectCount?0:1;}}QueuePopulationReadback();}
+    if(matterSystem){
+        const uint32_t base=uint32_t(visualHost.size())+(insectCapacity?
+            insectCount+4*LAB_PHYSICS_POPULATION_DETAIL_MAX_V1+LAB_POPULATION_SHADOW_MAX_V1:0);
+        MatterPack(stream,matterBuffer->getPositionInvMasses(),matterMoisture,
+            matterDesc.particleCount,base,matterDesc.radius,matterDesc.mesh,
+            matterDesc.material,visible,static_cast<GpuInstance*>(s.instances.pointer),
+            static_cast<uint32_t*>(s.control.pointer));
+        Cuda(cudaGetLastError(),"publish real PhysX GPU PBD positions");
+    }
     if(s.value==UINT64_MAX)Fail("PhysX publication fence exhausted");++s.value;s.producer.Signal(stream,s.value);s.leased=true;s.leaseGeneration=runtime.LeaseGeneration();
     *out={LABOVR_GPU_ABI_V1,sizeof(*out),LABOVR_GPU_DOMAIN_MESH_SOLID_V1,0,s.refs.data(),uint32_t(visible?s.refs.size():3),0,++publicationSequence,s.producer.handle,s.value,s.consumer.handle,s.value,&s,s.leaseGeneration};return 1;
 }
@@ -882,6 +920,53 @@ void PhysicsRuntime::Initialize(ID3D12Device* device){
     r.dispatcher=PxDefaultCpuDispatcherCreate(2);if(!r.dispatcher)Fail("PhysX CPU orchestration dispatcher creation failed");r.Check();LogEvent(0,"physics.initialize","physx=%u cuda_device=%d luid=%08x:%08x sm=%d%d workers=2",PX_PHYSICS_VERSION,selected,unsigned(luid.HighPart),unsigned(luid.LowPart),major,minor);
 }
 void PhysicsRuntime::Shutdown(){auto& r=*impl_;for(auto& [id,o]:r.owners)for(auto& [h,s]:o->scenes)s->Destroy();r.owners.clear();if(r.dispatcher)r.dispatcher->release();r.dispatcher=nullptr;if(r.cuda)r.cuda->release();r.cuda=nullptr;if(r.extensions)PxCloseExtensions();r.extensions=false;if(r.physics)r.physics->release();r.physics=nullptr;if(r.foundation)r.foundation->release();r.foundation=nullptr;}
+uint32_t PhysicsRuntime::Impl::Scene::ConfigureMatter(const LabPhysicsMatterDescV1& d){
+    constexpr uint32_t first=262144u,last=4194304u;
+    if(matterSystem||started||d.structSize<sizeof(d)||
+       (d.particleCount!=first&&d.particleCount!=1048576u&&
+        d.particleCount!=2097152u&&d.particleCount!=last)||
+       d.mesh>=ConsoleSpec::MaxMeshes||d.material>=ConsoleSpec::MaxMaterials||
+       !Valid(d.center)||!Finite(d.radius)||d.radius<=0.f||d.radius>.02f||
+       !Finite(d.density)||d.density<100.f||d.density>4000.f)return 0;
+    PxScopedCudaLock lock(*runtime.cuda);
+    matterDesc=d;
+    matterSide=d.particleCount==first?128u:d.particleCount==last?256u:192u;
+    matterWet=runtime.physics->createPBDMaterial(.65f,.12f,.65f,12.f,0.f,.35f,.65f,0.f,0.f);
+    matterDry=runtime.physics->createPBDMaterial(1.1f,.28f,.35f,.1f,0.f,.05f,.85f,0.f,0.f);
+    if(!matterWet||!matterDry)Fail("PhysX PBD material creation failed");
+    matterSystem=runtime.physics->createPBDParticleSystem(*runtime.cuda,96);
+    if(!matterSystem)Fail("PhysX GPU PBD particle system creation failed");
+    matterSystem->setRestOffset(d.radius);
+    matterSystem->setContactOffset(d.radius*1.8f);
+    matterSystem->setParticleContactOffset(d.radius*2.15f);
+    matterSystem->setSolidRestOffset(d.radius);
+    matterSystem->setFluidRestOffset(d.radius*.78f);
+    matterSystem->setMaxVelocity(12.f);
+    matterWetPhase=matterSystem->createPhase(matterWet,
+        PxParticlePhaseFlag::eParticlePhaseFluid|PxParticlePhaseFlag::eParticlePhaseSelfCollide);
+    matterDryPhase=matterSystem->createPhase(matterDry,
+        PxParticlePhaseFlag::eParticlePhaseSelfCollide);
+    matterBuffer=runtime.physics->createParticleBuffer(d.particleCount,0,runtime.cuda);
+    if(!matterBuffer)Fail("PhysX GPU PBD particle buffer allocation failed");
+    Allocate(matterMoisture,d.particleCount);Allocate(matterTemperature,d.particleCount);
+    const float mass=d.density*(4.f/3.f)*PxPi*d.radius*d.radius*d.radius;
+    MatterInitialize(stream,matterBuffer->getPositionInvMasses(),matterBuffer->getVelocities(),
+        matterBuffer->getPhases(),matterMoisture,matterTemperature,d.particleCount,
+        matterSide,V(d.center),d.radius,1.f/mass,matterWetPhase);
+    Cuda(cudaGetLastError(),"initialize GPU PBD matter");
+    Cuda(cudaStreamSynchronize(stream),"commit GPU PBD initial particles");
+    matterBuffer->setNbActiveParticles(d.particleCount);
+    matterSystem->addParticleBuffer(matterBuffer);
+    scene->addActor(*matterSystem);
+    runtime.Check();
+    auto visualCopy=visuals;auto lightCopy=lights;
+    if(!SetVisuals(visualCopy.data(),uint32_t(visualCopy.size()),
+         lightCopy.data(),uint32_t(lightCopy.size())))
+        Fail("GPU PBD publication resize rejected");
+    LogEvent(0,"physics.matter","scene=%llu backend=PhysXGPU_PBD particles=%u radius=%.6f density=%.1f mesh=%u material=%u profile=measurement_pending",
+        static_cast<unsigned long long>(handle),d.particleCount,d.radius,d.density,d.mesh,d.material);
+    return 1;
+}
 uint32_t PhysicsRuntime::Impl::Scene::ConfigurePopulation(const LabPopulationDescV1& d){
     if(desc.maxBodies>LAB_PHYSICS_POPULATION_COLLIDERS_V1||insectCapacity||d.structSize<sizeof(d)||d.layer==0||d.collisionMask==0||d.capacity<1||d.capacity>LAB_PHYSICS_POPULATION_MAX_V1||d.initialCount>d.capacity||!Valid(d.spawnCenter)||!Valid(d.spawnHalfExtent)||d.spawnHalfExtent.x<0||d.spawnHalfExtent.y<0||d.spawnHalfExtent.z<0||!ValidFlight(d.flight))return 0;
     for(auto mesh:{d.proxyMesh,d.bodyMesh,d.headMesh,d.abdomenMesh,d.leftWingMesh,d.rightWingMesh})if(mesh>=ConsoleSpec::MaxMeshes)return 0;
@@ -938,6 +1023,10 @@ uint64_t PhysicsRuntime::CreateOwner(const LabGpuInteropServiceV1& interop){
     t.PollSnapshot=[](void* c,LabPhysicsSceneV1 h,LabPhysicsSnapshotV1* out)->LabU32{if(!c)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->Poll(out):0;};
     t.SetBodyCollisionEnabled=[](void* c,LabPhysicsSceneV1 h,LabPhysicsBodyV1 b,LabU32 enabled)->LabU32{if(!c||enabled>1)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->SetBodyCollisionEnabled(b,enabled!=0):0;};
     t.SetBodySpeculativeCCD=[](void* c,LabPhysicsSceneV1 h,LabPhysicsBodyV1 b,LabU32 enabled)->LabU32{if(!c||enabled>1)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->SetBodySpeculativeCCD(b,enabled!=0):0;};
+    t.CreateMatter=[](void* c,LabPhysicsSceneV1 h,const LabPhysicsMatterDescV1* d)->LabU32{
+        if(!c||!d)return 0;auto& o=*static_cast<Impl::Owner*>(c);
+        auto* s=o.runtime->Find(o,h);return s?s->ConfigureMatter(*d):0;
+    };
     t.CreatePopulation=[](void* c,LabPhysicsSceneV1 h,const LabPopulationDescV1* d)->LabU32{if(!c||!d)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->ConfigurePopulation(*d):0;};
     t.SetPopulationCount=[](void* c,LabPhysicsSceneV1 h,LabU32 n)->LabU32{if(!c)return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);return s?s->ResizePopulation(n):0;};
     t.SetFlightSettings=[](void* c,LabPhysicsSceneV1 h,const LabFlightSettingsV1* f)->LabU32{if(!c||!f||!ValidFlight(*f))return 0;auto& o=*static_cast<Impl::Owner*>(c);auto* s=o.runtime->Find(o,h);if(!s||!s->insectCapacity||f->seed!=s->population.flight.seed)return 0;s->population.flight=*f;s->populationEffects.fleeSeconds=f->impactSeconds;return 1;};
