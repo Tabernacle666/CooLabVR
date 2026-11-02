@@ -1,5 +1,6 @@
 #include "PhysicsRuntime.h"
 #include "PhysicsDiagnostics.h"
+#include "PhysicsGpuInterop.h"
 #include "PhysicsCuda.h"
 #include "PopulationCuda.h"
 #include "PopulationPolicy.h"
@@ -68,30 +69,8 @@ struct Errors final:PxErrorCallback {
         }
     }
 };
-struct SharedBuffer {
-    LabGpuInteropResourceHandleV1 handle{};cudaExternalMemory_t memory{};void* pointer{};uint64_t bytes{};
-    void Create(const LabGpuInteropServiceV1& interop,uint64_t size){
-        bytes=size;Gpu(interop.CreateSharedBuffer(interop.serviceContext,size,&handle)!=0,"PhysX: shared DX12 buffer creation failed");
-        LabGpuInteropMemoryExportV1 out{sizeof(out)};Gpu(interop.GetCudaMemoryHandle(interop.serviceContext,handle,&out)!=0,"PhysX: DX12 memory export failed");
-        cudaExternalMemoryHandleDesc d{};d.type=cudaExternalMemoryHandleTypeD3D12Resource;d.handle.win32.handle=out.win32Handle;d.size=out.allocationBytes;d.flags=cudaExternalMemoryDedicated;
-        auto result=cudaImportExternalMemory(&memory,&d);CloseHandle(out.win32Handle);Cuda(result,"import DX12 resource");
-        cudaExternalMemoryBufferDesc b{};b.size=out.resourceBytes;Cuda(cudaExternalMemoryGetMappedBuffer(&pointer,memory,&b),"map DX12 resource");
-    }
-    void Destroy(const LabGpuInteropServiceV1& interop){if(pointer)Cuda(cudaFree(pointer),"unmap DX12 buffer");if(memory)Cuda(cudaDestroyExternalMemory(memory),"release DX12 import");if(handle)interop.ReleaseResource(interop.serviceContext,handle);*this={};}
-};
-struct SharedFence {
-    LabGpuInteropFenceHandleV1 handle{};cudaExternalSemaphore_t semaphore{};
-    void Create(const LabGpuInteropServiceV1& interop){
-        Gpu(interop.CreateSharedFence(interop.serviceContext,0,&handle)!=0,"PhysX: shared DX12 fence creation failed");
-        LabGpuInteropFenceExportV1 out{sizeof(out)};Gpu(interop.GetCudaFenceHandle(interop.serviceContext,handle,1,&out)!=0,"PhysX: DX12 fence export failed");
-        cudaExternalSemaphoreHandleDesc d{};d.type=cudaExternalSemaphoreHandleTypeD3D12Fence;d.handle.win32.handle=out.win32Handle;
-        auto result=cudaImportExternalSemaphore(&semaphore,&d);CloseHandle(out.win32Handle);Cuda(result,"import DX12 fence");
-    }
-    uint64_t Completed(const LabGpuInteropServiceV1& interop){LabGpuInteropFenceExportV1 out{sizeof(out)};Gpu(interop.GetCudaFenceHandle(interop.serviceContext,handle,0,&out)!=0,"PhysX: query DX12 fence failed");return out.completedValue;}
-    void Wait(cudaStream_t stream,uint64_t value){if(value){cudaExternalSemaphoreWaitParams p{};p.params.fence.value=value;Cuda(cudaWaitExternalSemaphoresAsync(&semaphore,&p,1,stream),"wait DX12 consumer");}}
-    void Signal(cudaStream_t stream,uint64_t value){cudaExternalSemaphoreSignalParams p{};p.params.fence.value=value;Cuda(cudaSignalExternalSemaphoresAsync(&semaphore,&p,1,stream),"signal CUDA producer");}
-    void Destroy(const LabGpuInteropServiceV1& interop){if(semaphore)Cuda(cudaDestroyExternalSemaphore(semaphore),"release fence import");if(handle)interop.ReleaseFence(interop.serviceContext,handle);*this={};}
-};
+using physics_detail::SharedBuffer;
+using physics_detail::SharedFence;
 }
 struct PhysicsRuntime::Impl {
     struct Owner;
