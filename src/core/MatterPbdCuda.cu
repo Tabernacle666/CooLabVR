@@ -1,6 +1,7 @@
 #include "MatterPbdCuda.h"
 #include "AirflowCuda.h"
 #include <cuda_runtime.h>
+#include <climits>
 using namespace physx;
 namespace lab {
 namespace {
@@ -142,6 +143,57 @@ __global__ void TransportVapor(MatterVaporField vapor,const PhysicsAirflowGpu* a
     concentration+=vapor.sources[i]/volumeM3;
     vapor.next[i]=fmaxf(0.f,concentration)*expf(-.08f*dt);
 }
+__device__ int OrderedFloat(float value) {
+    const int bits=__float_as_int(value);
+    return bits<0?(bits^0x7fffffff):bits;
+}
+__global__ void ResetProbe(MatterDiagnosticsGpu* out) {
+    for(int axis=0;axis<3;axis++){out->lower[axis]=INT_MAX;out->upper[axis]=INT_MIN;}
+    out->wet=out->dry=out->hot=0;
+}
+__global__ void Probe(const PxVec4* positions,const float* moisture,
+    const float* temperature,uint32_t count,MatterDiagnosticsGpu* out) {
+    constexpr uint32_t BlockSize=256;
+    const uint32_t lane=threadIdx.x;
+    MatterDiagnosticsGpu local{};
+    for(int axis=0;axis<3;axis++){local.lower[axis]=INT_MAX;local.upper[axis]=INT_MIN;}
+    const uint32_t stride=gridDim.x*blockDim.x;
+    for(uint32_t i=blockIdx.x*blockDim.x+lane;i<count;i+=stride){
+        const PxVec4 p=positions[i];
+        const int coords[3]={OrderedFloat(p.x),OrderedFloat(p.y),OrderedFloat(p.z)};
+        for(int axis=0;axis<3;axis++){
+            if(coords[axis]<local.lower[axis])local.lower[axis]=coords[axis];
+            if(coords[axis]>local.upper[axis])local.upper[axis]=coords[axis];
+        }
+        if(moisture[i]>.28f)++local.wet;else ++local.dry;
+        if(temperature[i]>30.f)++local.hot;
+    }
+    __shared__ MatterDiagnosticsGpu partial[BlockSize];
+    partial[lane]=local;
+    __syncthreads();
+    for(uint32_t offset=BlockSize/2;offset;offset>>=1){
+        if(lane<offset){
+            const auto other=partial[lane+offset];
+            for(int axis=0;axis<3;axis++){
+                if(other.lower[axis]<partial[lane].lower[axis])partial[lane].lower[axis]=other.lower[axis];
+                if(other.upper[axis]>partial[lane].upper[axis])partial[lane].upper[axis]=other.upper[axis];
+            }
+            partial[lane].wet+=other.wet;
+            partial[lane].dry+=other.dry;
+            partial[lane].hot+=other.hot;
+        }
+        __syncthreads();
+    }
+    if(!lane){
+        for(int axis=0;axis<3;axis++){
+            atomicMin(&out->lower[axis],partial[0].lower[axis]);
+            atomicMax(&out->upper[axis],partial[0].upper[axis]);
+        }
+        atomicAdd(&out->wet,partial[0].wet);
+        atomicAdd(&out->dry,partial[0].dry);
+        atomicAdd(&out->hot,partial[0].hot);
+    }
+}
 __global__ void Pack(const PxVec4* positions,const float* moisture,
     uint32_t count,uint32_t base,float radius,uint32_t mesh,uint32_t material,
     bool visible,GpuInstance* instances,uint32_t* control) {
@@ -190,6 +242,11 @@ void MatterEvolve(cudaStream_t stream,const PxVec4* p,const PxVec4* v,
         airflowCount,poses,angular,dt,time);
     cudaMemcpyAsync(moisture,nextMoisture,n*sizeof(float),cudaMemcpyDeviceToDevice,stream);
     cudaMemcpyAsync(phaseChangedHost,phaseChangedDevice,sizeof(uint32_t),cudaMemcpyDeviceToHost,stream);
+}
+void MatterProbe(cudaStream_t stream,const PxVec4* positions,
+    const float* moisture,const float* temperature,uint32_t n,MatterDiagnosticsGpu* out) {
+    ResetProbe<<<1,1,0,stream>>>(out);
+    if(n)Probe<<<256,256,0,stream>>>(positions,moisture,temperature,n,out);
 }
 void MatterPack(cudaStream_t stream,const PxVec4* p,const float* moisture,
     uint32_t n,uint32_t base,float radius,uint32_t mesh,uint32_t material,

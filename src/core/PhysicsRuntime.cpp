@@ -120,6 +120,9 @@ struct PhysicsRuntime::Impl {
         LabPhysicsMatterDescV1 matterDesc{};
         float* matterMoisture{},*matterNextMoisture{},*matterTemperature{},*matterExposure{};
         uint32_t* matterPhaseChangedDevice{},*matterPhaseChangedHost{};
+        MatterDiagnosticsGpu* matterProbeDevice{},*matterProbeHost{};
+        cudaEvent_t matterProbeDone{},matterProbeBegin{},matterProbeEnd{};
+        bool matterProbePending{};
         MatterVaporField matterVapor{};
         float matterWaterMass{};
         uint32_t matterSide{};
@@ -297,6 +300,11 @@ void PhysicsRuntime::Impl::Scene::Destroy(){
     if(matterExposure)cudaFree(matterExposure);
     if(matterPhaseChangedDevice)cudaFree(matterPhaseChangedDevice);
     if(matterPhaseChangedHost)cudaFreeHost(matterPhaseChangedHost);
+    if(matterProbeDevice)cudaFree(matterProbeDevice);
+    if(matterProbeHost)cudaFreeHost(matterProbeHost);
+    if(matterProbeDone)cudaEventDestroy(matterProbeDone);
+    if(matterProbeBegin)cudaEventDestroy(matterProbeBegin);
+    if(matterProbeEnd)cudaEventDestroy(matterProbeEnd);
     if(matterVapor.density)cudaFree(matterVapor.density);
     if(matterVapor.next)cudaFree(matterVapor.next);
     if(matterVapor.sources)cudaFree(matterVapor.sources);
@@ -689,6 +697,39 @@ void PhysicsRuntime::Impl::Scene::Advance(double now,uint64_t inputFrame){
     alpha=float(std::clamp(accumulator/double(desc.fixedStepSeconds),0.,1.));
     if(descriptorsDirty&&started){Cuda(cudaStreamSynchronize(stream),"retire descriptor uploads");RefreshDescriptors();}
     if(started)QueueProbe();
+    if(matterSystem&&SessionLogCompact()){
+        if(matterProbePending){
+            const auto ready=cudaEventQuery(matterProbeDone);
+            if(ready==cudaSuccess){
+                auto ordinate=[](int ordered){
+                    const uint32_t bits=ordered<0?(uint32_t(ordered)^0x7fffffffu):uint32_t(ordered);
+                    float value;std::memcpy(&value,&bits,sizeof(value));return value;
+                };
+                float sampleMs=0;
+                Cuda(cudaEventElapsedTime(&sampleMs,matterProbeBegin,matterProbeEnd),
+                    "measure GPU PBD state sample");
+                const auto& d=*matterProbeHost;
+                LogEvent(frame,"physics.matter.state",
+                    "active=%u wet=%u dry=%u hot=%u centers_min_xyz=%.5f,%.5f,%.5f centers_max_xyz=%.5f,%.5f,%.5f radius=%.6f sample_gpu_span_ms=%.3f",
+                    matterDesc.particleCount,d.wet,d.dry,d.hot,
+                    ordinate(d.lower[0]),ordinate(d.lower[1]),ordinate(d.lower[2]),
+                    ordinate(d.upper[0]),ordinate(d.upper[1]),ordinate(d.upper[2]),
+                    matterDesc.radius,sampleMs);
+                matterProbePending=false;
+            }else if(ready!=cudaErrorNotReady)Cuda(ready,"query GPU PBD state sample");
+        }
+        if(!matterProbePending&&frame%120==0){
+            Cuda(cudaEventRecord(matterProbeBegin,stream),"begin GPU PBD state sample");
+            MatterProbe(stream,matterBuffer->getPositionInvMasses(),matterMoisture,
+                matterTemperature,matterDesc.particleCount,matterProbeDevice);
+            Cuda(cudaGetLastError(),"sample every PhysX PBD particle on GPU");
+            Cuda(cudaEventRecord(matterProbeEnd,stream),"end GPU PBD state sample");
+            Cuda(cudaMemcpyAsync(matterProbeHost,matterProbeDevice,sizeof(*matterProbeHost),
+                cudaMemcpyDeviceToHost,stream),"read compact PBD state sample");
+            Cuda(cudaEventRecord(matterProbeDone,stream),"finish GPU PBD state sample");
+            matterProbePending=true;
+        }
+    }
     if(timing)Cuda(cudaEventRecord(timing->end,stream),"end physical GPU span");
     // Continuous commands expire only after being consumed. An impulse survives
     // a display frame that had no physics tick.
@@ -764,6 +805,11 @@ uint32_t PhysicsRuntime::Impl::Scene::Acquire(LabGpuPublicationV1* out){
             matterDesc.material,visible,static_cast<GpuInstance*>(s.instances.pointer),
             static_cast<uint32_t*>(s.control.pointer));
         Cuda(cudaGetLastError(),"publish real PhysX GPU PBD positions");
+        if(SessionLogCompact()&&frame%120==0)
+            LogEvent(frame,"physics.matter.publication",
+                "active=%u published=%u visibility_enabled=%u instance_base=%u radius=%.6f mesh=%u material=%u",
+                matterDesc.particleCount,visible?matterDesc.particleCount:0u,unsigned(visible),
+                base,matterDesc.radius,matterDesc.mesh,matterDesc.material);
     }
     if(s.value==UINT64_MAX)Fail("PhysX publication fence exhausted");++s.value;s.producer.Signal(stream,s.value);s.leased=true;s.leaseGeneration=runtime.LeaseGeneration();
     *out={LABOVR_GPU_ABI_V1,sizeof(*out),LABOVR_GPU_DOMAIN_MESH_SOLID_V1,0,s.refs.data(),uint32_t(visible?s.refs.size():3),0,++publicationSequence,s.producer.handle,s.value,s.consumer.handle,s.value,&s,s.leaseGeneration};return 1;
@@ -992,6 +1038,12 @@ uint32_t PhysicsRuntime::Impl::Scene::ConfigureMatter(const LabPhysicsMatterDesc
     Cuda(cudaHostAlloc(reinterpret_cast<void**>(&matterPhaseChangedHost),
         sizeof(uint32_t),cudaHostAllocDefault),"allocate pinned PBD phase transition flag");
     *matterPhaseChangedHost=0;
+    Allocate(matterProbeDevice,1);
+    Cuda(cudaHostAlloc(reinterpret_cast<void**>(&matterProbeHost),
+        sizeof(MatterDiagnosticsGpu),cudaHostAllocDefault),"allocate compact pinned PBD state sample");
+    Cuda(cudaEventCreateWithFlags(&matterProbeDone,cudaEventDisableTiming),"create PBD sample completion");
+    Cuda(cudaEventCreate(&matterProbeBegin),"create PBD sample begin");
+    Cuda(cudaEventCreate(&matterProbeEnd),"create PBD sample end");
     const float mass=d.density*(4.f/3.f)*PxPi*d.radius*d.radius*d.radius;
     matterWaterMass=mass*.5f; // material water fraction, in kg per fully hydrated particle
     matterVapor.dimension=64;

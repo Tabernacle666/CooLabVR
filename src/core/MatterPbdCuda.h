@@ -1,6 +1,10 @@
 #pragma once
 #include "PhysicsCuda.h"
 namespace lab {
+struct MatterDiagnosticsGpu {
+    int lower[3]{},upper[3]{};
+    uint32_t wet{},dry{},hot{};
+};
 struct MatterVaporField {
     float* density{},*next{},*sources{};
     physx::PxVec3 origin{0.f,0.f,0.f};
@@ -21,6 +25,10 @@ void MatterEvolve(cudaStream_t stream, const physx::PxVec4* positions,
     const physx::PxTransform* poses, const PhysicsAirflowGpu* airflows,
     uint32_t airflowCount, const physx::PxVec3* angular, float dt, float time,
     uint32_t* phaseChangedDevice, uint32_t* phaseChangedHost);
+// Asynchronous full-particle diagnostic, never a CPU simulation proxy.
+void MatterProbe(cudaStream_t stream,const physx::PxVec4* positions,
+    const float* moisture,const float* temperature,uint32_t count,
+    MatterDiagnosticsGpu* output);
 void MatterPack(cudaStream_t stream, const physx::PxVec4* positions,
     const float* moisture, uint32_t count, uint32_t base, float radius,
     uint32_t mesh, uint32_t material, bool visible, GpuInstance* instances,
