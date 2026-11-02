@@ -3,30 +3,13 @@
   "role": "qa",
   "cycle_id": "caca-aaa-002",
   "billet": "matiere-pbd-001",
-  "source_sha": "7be5552797c4531900f270078919e0e41c3a4846",
+  "source_sha": "0da8d4cdfd0928af2fde0b1e92308a0c8ae7ff99",
   "autorisation_commit_sha": "120b90855db8c9b638751289e4748844718f20f1",
-  "tentative": 1,
+  "tentative": 2,
   "etat": "termine",
   "examen": "complet",
-  "resultat": "a_corriger",
-  "destination": "dev",
-  "nombre_constats": 2,
-  "constats": [
-    {
-      "id": "QA-MATIERE-001",
-      "fichier": "src/core/PhysicsRuntime.cpp ; src/core/MatterPbdCuda.cu ; labs/labovr/HomePhysics.cpp",
-      "symbole": "Scene::ConfigureMatter / Environment / HomePhysics::Build",
-      "preuve": "PhysicsRuntime.cpp:1021-1040 crée seulement les phases PBD humide (fluide) et sèche (auto-collision), sans liaison de surface rompable ni mécanisme de fracture. MatterPbdCuda.cu:82-111 détecte uniquement les six voisins d'index initiaux et commute wetPhase/dryPhase au seuil w=0,28 ; aucune contrainte de croûte n'est rompue par un choc. HomePhysics.cpp:91-266 n'instancie aucun bâton ou outil de test de fissure.",
-      "exigence": "masterticket.md : la surface sèche doit constituer une croûte plus rigide et se fissurer par contact physique d'un bâton, révélant l'humidité interne.",
-      "consequence": "Les phases peuvent changer et les particules se séparer, mais la formation puis la rupture mécanique d'une croûte sous un outil ne sont pas implémentées ; ce phénomène demandé ne peut pas être validé."
-    },
-    {
-      "id": "QA-MATIERE-002",
-      "fichier": "src/core/MatterPbdCuda.cu ; labs/labovr/HomePhysics.cpp ; shaders/scene.hlsl ; shaders/compute.hlsl",
-      "symbole": "Pack / Material::Bark / MeshMain / CullMain",
-      "preuve": "MatterPbdCuda.cu:230-237 écrit le degré de dessèchement dans GpuInstance.scale.w, mais conserve un material constant. HomePhysics.cpp:99-106 définit une unique couleur de Bark et HomePhysics.cpp:258-264 attribue ce matériau à toutes les particules. Les shaders de rendu MeshSolid scene.hlsl et compute.hlsl ne lisent pas scale.w pour la matière; les lectures de scale.w dans atmosphere.hlsl et optical.hlsl concernent les ombres/mouches et non les instances PBD (flags=1|8|4|32).",
-      "exigence": "masterticket.md : surface qui sèche et forme une croûte différenciée, avec matière réellement rendue depuis son état GPU ; rapport architecte : matérialiser et rendre vérifiable ce phénomène.",
-      "consequence": "Le rendu de la matière n'utilise ni l'humidité ni la phase sèche de ses particules : la surface et le cœur gardent le même matériau et aucune transition visuelle de croûte n'est produite."
-    }
-  ]
+  "resultat": "conforme",
+  "destination": "arch",
+  "nombre_constats": 0,
+  "constats": []
 }

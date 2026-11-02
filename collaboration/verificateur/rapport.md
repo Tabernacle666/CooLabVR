@@ -1,40 +1,21 @@
-# Vérification QA — matiere-pbd-001 · caca-aaa-002 · tentative 1
+# Vérification QA — matiere-pbd-001 · caca-aaa-002 · tentative 2
 
-- Code figé : `7be5552797c4531900f270078919e0e41c3a4846`
-- Relais de livraison : `d71cc41375fbe659979e69239a2df0768a102e37`
-- Base de comparaison : `e59e0346d2d4bd84c5a8636bff48b30ba7b47a24`
+- Code figé : `0da8d4cdfd0928af2fde0b1e92308a0c8ae7ff99`
+- Relais de livraison : `d06d1d82a25517cda0da98f19526c2b82a44999a`
+- Base de correction : `7be5552797c4531900f270078919e0e41c3a4846`
 - Autorisation du programmeur : `120b90855db8c9b638751289e4748844718f20f1`
-- Examen : inspection statique du diff source (9 fichiers), interfaces réelles PhysX épinglées par CMake, GPU CUDA/PBD, intégration HomePhysics, consommateurs shader, exigences du masterticket et rapport architectural. Aucun diagnostic/capture examiné.
-- **Résultat : `a_corriger` — destination `dev` — 2 constats.**
+- Examen : inspection statique du diff de correction et des cinq fichiers de code concernés, des déclarations CUDA/PhysX, des appels d'intégration, des consommateurs HLSL et des exigences du masterticket. Aucun lancement, aucune compilation ni capture examinée.
+- **Résultat : `conforme` — destination `arch` — 0 constat.**
 
-## Éléments statiquement présents
+## Vérification des corrections demandées
 
-- Configuration réelle PhysX PBD (`PxPBDParticleSystem`, `PxParticleBuffer`, `PxPBDMaterial`), phases et positions directement accessibles en CUDA. Les appels `createPBDParticleSystem`, `createPBDMaterial`, `createParticleBuffer`, `createPhase`, `setNbActiveParticles`, `raiseFlags` concordent avec les interfaces du tag PhysX `110.1-omni-and-physx-5.9.0`.
-- Quatre profils de 262 144 à 4 194 304 particules, rendu par instances GPU aux positions PBD, champs CUDA d'humidité/température/vapeur, attraction des mouches et instrumentation GPU.
-- Conservation statique de l'essentiel des corps, contraintes et services du laboratoire dans le diff.
+1. **QA-MATIERE-001 — liaison et rupture de la croûte** : `MatterPbdCuda.cu` maintient sur GPU les masques de liaisons et de fractures, forme des ressorts entre particules desséchées en contact, rompt les liaisons selon leur allongement et recalcule l'exposition et la vapeur des faces ouvertes. `PhysicsRuntime.cpp` alloue, initialise, transmet et libère ces états, puis signale au tampon PBD la mise à jour des vitesses ; `HomePhysics.cpp` crée un bâton capsule PhysX dynamique manipulable. L'inspection ne relève pas d'absence statique du mécanisme précédemment demandé.
+2. **QA-MATIERE-002 — rendu de la sécheresse** : `MatterPack` écrit la sécheresse issue de l'humidité GPU dans `GpuInstance.scale.w` et identifie les particules par le préfixe `0x72`. `scene.hlsl` transmet cette donnée via les sorties du mesh shader, puis `PixelMain` applique aux seules particules de matière une variation de couleur et de rugosité. Le consommateur de l'état de sécheresse existe effectivement dans le rendu.
 
-## Constats imposant correction
+## Périmètre et limites
 
-### QA-MATIERE-001 — Croûte fissurable et interaction mécanique absentes
+Fichiers de correction examinés : `labs/labovr/HomePhysics.cpp`, `shaders/scene.hlsl`, `src/core/MatterPbdCuda.cu`, `src/core/MatterPbdCuda.h`, `src/core/PhysicsRuntime.cpp`. Interfaces et configuration de compilation consultées pour vérifier leurs dépendances. Aucun changement au code de production par QA.
 
-**Fichiers :** `src/core/PhysicsRuntime.cpp`, `src/core/MatterPbdCuda.cu`, `labs/labovr/HomePhysics.cpp`.
+**Aucune divergence constatée.**
 
-**Preuve :** `ConfigureMatter` crée une phase fluide humide et une phase sèche en auto-collision mais aucune liaison/structure de surface rompable. `Environment` calcule les contacts parmi six voisins fixés par les indices initiaux, puis change de phase selon l'humidité; aucun critère d'endommagement ni rupture de croûte par impact. `HomePhysics::Build` n'instancie pas de bâton pour le contact demandé.
-
-**Exigence :** le masterticket impose qu'une croûte plus rigide se forme, se fissure au contact physique d'un bâton et révèle de l'humidité interne.
-
-**Conséquence :** le séchage et la séparation de particules ne constituent pas une fracture mécanique démontrable de croûte. Ajouter le comportement physique réel sans animation de substitution.
-
-### QA-MATIERE-002 — État de sécheresse non rendu visuellement
-
-**Fichiers :** `src/core/MatterPbdCuda.cu`, `labs/labovr/HomePhysics.cpp`, `shaders/scene.hlsl`, `shaders/compute.hlsl`.
-
-**Preuve :** `MatterPack` place `dry=1-moisture[i]` dans `GpuInstance.scale.w` mais fixe `material` à la valeur initiale. `HomePhysics::Build` assigne `Material::Bark` à toutes les particules. Les shaders MeshSolid ne consomment pas `scale.w` pour distinguer humide/sec ; ses usages dans les shaders d'atmosphère/optique sont réservés aux mouches/ombres.
-
-**Exigence :** l'état de matière simulé doit produire une croûte de surface perceptible et vérifiable; ne pas confondre présence d'une valeur GPU et comportement rendu.
-
-**Conséquence :** le cœur humide et la surface sèche ne sont pas distingués par le rendu ; le dessèchement demandé n'est pas vérifiable visuellement.
-
-## Limites
-
-Inspection statique uniquement. Aucune compilation, aucun lancement, aucun casque, aucune capture ni mesure de FPS effectués par QA. Les performances, contacts et effets visuels demandent les preuves locales ultérieures du propriétaire, seulement après QA conforme. Ne pas réveiller l'architecte : le billet est renvoyé au programmeur pour correction de ces deux constats.
+Cette conformité est strictement statique : elle ne prouve ni compilation réelle, ni stabilité GPU/PhysX, ni fissuration visible, ni performance à 72 Hz. Le propriétaire doit effectuer le diagnostic local sur le SHA livré ; l'architecte ne décide qu'après vérification de ses preuves, conformément à `gabarit.md`.
