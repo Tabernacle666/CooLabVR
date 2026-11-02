@@ -15,8 +15,6 @@ public:
     uint64_t CreateOwner(const LabGpuInteropServiceV1&);
     void ResetOwner(uint64_t);
     LabPhysicsServiceV1 Service(uint64_t);
-    // Topology changes must be committed before the renderer acquires a publication.
-    bool NeedsSynchronousAdvance() const;
     void Advance(double displaySeconds,uint64_t inputFrame);
 };
 }

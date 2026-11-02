@@ -291,24 +291,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
         void Add(double elapsedMs){totalMs+=elapsedMs;++calls;}
         double Average()const{return calls?totalMs/double(calls):0.0;}
     };
-    StageCpu homeCpu,physicsCpu,physicsJoinCpu,prepareCpu,acquireCpu,submitCpu;
-    struct PhysicsWork { PhysicsRuntime* runtime{}; double now{},elapsedMs{}; uint64_t frame{}; bool measured{}; };
-    PhysicsWork physicsWork{&physics};JobSystem::Group physicsGroup;bool physicsPending=false;
-    uint64_t physicsAsyncFrames=0,physicsSyncFrames=0;
-    auto finishPhysics=[&](){
-        if(!physicsPending)return 0.0;
-        const double begin=QpcNowSeconds();jobs.Wait(physicsGroup);
-        const double waitMs=(QpcNowSeconds()-begin)*1000.;
-        physicsPending=false;
-        if(physicsWork.measured)physicsCpu.Add(physicsWork.elapsedMs);
-        return waitMs;
-    };
-    auto runPhysics=[](void* context,uint32_t,uint32_t){
-        auto& work=*static_cast<PhysicsWork*>(context);
-        const double begin=QpcNowSeconds();
-        work.runtime->Advance(work.now,work.frame);
-        work.elapsedMs=(QpcNowSeconds()-begin)*1000.;
-    };
+    StageCpu homeCpu,physicsCpu,prepareCpu,acquireCpu,submitCpu;
     // The GPU timestamp burst begins after BOTH baseline images have been saved.
     // It does not perturb ordinary CPU timing or the reference screenshots.
     constexpr uint64_t DiagnosticGpuBurstFrames=90;
@@ -368,18 +351,13 @@ int RenderThread(Channels& io,const RunOptions& options) {
         }
         xr.PollEvents();if(!xr.Running()){Sleep(5);continue;}
         XRFrame frame;if(!xr.BeginFrame(frame))continue;
-        performance.BeginFrame(frame,activeWorldId,activeWorldName,options.scene,graphics,io);
-        const double activeFrameBegin=QpcNowSeconds();
-        // No world, plugin, publication or scene mutation may run until the
-        // preceding frame's physics job has relinquished the scene.
-        double physicsJoinMs;
-        {auto scope=performance.Measure(CpuStage::PhysicsAdvance);physicsJoinMs=finishPhysics();}
-        if(options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished)physicsJoinCpu.Add(physicsJoinMs);
         if(diagnosticGpuActive){xrWaitCpu.Add(frame.performanceTiming.waitFrameMs);xrBeginCpu.Add(frame.performanceTiming.beginFrameMs);xrSyncCpu.Add(frame.performanceTiming.syncActionsMs);}
+        const double activeFrameBegin=QpcNowSeconds();
         if(activeFrameBegin>=inputConfigurationCheckAt){
             inputConfigurationCheckAt=activeFrameBegin+1.;auto modified=std::filesystem::last_write_time(inputConfiguration,inputConfigurationError);
             if(!inputConfigurationError&&modified!=inputConfigurationWrite){inputSystem.LoadConfiguration(inputConfiguration);clientInput.LoadConfiguration(inputConfiguration);home.LoadConfiguration(inputConfiguration);inputConfigurationWrite=modified;}
         }
+        performance.BeginFrame(frame,activeWorldId,activeWorldName,options.scene,graphics,io);
         io.input.write()=frame.input;io.input.publish();double now=frame.input.targetDisplayQpc?QpcSeconds(frame.input.targetDisplayQpc):frame.input.time;if(frame.input.Pressed(StandardVrActions().menu,0))menuVisible=!menuVisible;home.SetMenuVisible(menuVisible);pluginHost.SetInputCaptured(menuVisible&&activePlugin!=nullptr);if(activePlugin&&activePlugin->Active()){
             auto scope=performance.Measure(CpuStage::WorldFrame);
             activePlugin->Frame(frame.input.frameId,now);
@@ -450,15 +428,11 @@ int RenderThread(Channels& io,const RunOptions& options) {
             LogEvent(frame.input.frameId,"plugin.transition","stage=complete");
         }
         else if(command.kind==HomeCommandKind::Quit)io.stop=true;
-        // A changed topology cannot publish the previous indices: commit it
-        // synchronously before rendering. Stable scenes advance after submit.
-        bool physicsAdvancedSynchronously=false;
-        if(physics.NeedsSynchronousAdvance()){
+        {
             auto scope=performance.Measure(CpuStage::PhysicsAdvance);
-            const double begin=QpcNowSeconds();
+            const double begin=options.diagnosticSeconds?QpcNowSeconds():0.;
             physics.Advance(now,frame.input.frameId);
             if(options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished)physicsCpu.Add((QpcNowSeconds()-begin)*1000.);
-            physicsAdvancedSynchronously=true;++physicsSyncFrames;
         }
         home.PublishMenu();
         {
@@ -616,14 +590,7 @@ int RenderThread(Channels& io,const RunOptions& options) {
                 diagnosticFailed=true;home.SetAmbientVisible(true);diagnosticHiddenActive=false;io.stop=true;
             }
         }
-        if(!physicsAdvancedSynchronously&&!io.stop.load(std::memory_order_relaxed)){
-            physicsWork.now=now;physicsWork.frame=frame.input.frameId;physicsWork.elapsedMs=0.;
-            physicsWork.measured=options.diagnosticSeconds&&!diagnosticGpuActive&&!diagnosticGpuFinished;
-            physicsPending=true;++physicsAsyncFrames;
-            jobs.Submit(runPhysics,&physicsWork,0,1,&physicsGroup);
-        }
     }
-    finishPhysics();
     io.stop=true;
     if(diagnosticHiddenActive){home.SetAmbientVisible(true);diagnosticHiddenActive=false;}
     diagnosticMutation.Close();diagnosticCollision.Close();
@@ -653,10 +620,8 @@ int RenderThread(Channels& io,const RunOptions& options) {
             static_cast<unsigned long long>(diagnosticTracked),static_cast<unsigned long long>(diagnosticSubmitted),
             diagnosticFrames?diagnosticCpuTotal/double(diagnosticFrames):0,diagnosticCpuPeak,
             QpcNowSeconds()-diagnosticStarted,unsigned(validation.errors),unsigned(validation.warnings));
-        LogEvent(0,"sweep.cpu","home_avg_ms=%.3f physics_avg_ms=%.3f physics_join_avg_ms=%.3f physics_async_total=%llu physics_sync_total=%llu prepare_avg_ms=%.3f acquire_avg_ms=%.3f submit_avg_ms=%.3f over_budget=%llu display_period_ms=%.3f requested=%llu",
-            homeCpu.Average(),physicsCpu.Average(),physicsJoinCpu.Average(),
-            static_cast<unsigned long long>(physicsAsyncFrames),static_cast<unsigned long long>(physicsSyncFrames),
-            prepareCpu.Average(),acquireCpu.Average(),submitCpu.Average(),
+        LogEvent(0,"sweep.cpu","home_avg_ms=%.3f physics_avg_ms=%.3f prepare_avg_ms=%.3f acquire_avg_ms=%.3f submit_avg_ms=%.3f over_budget=%llu display_period_ms=%.3f requested=%llu",
+            homeCpu.Average(),physicsCpu.Average(),prepareCpu.Average(),acquireCpu.Average(),submitCpu.Average(),
             static_cast<unsigned long long>(diagnosticOverBudget),
             diagnosticFrames?diagnosticPeriodMs/double(diagnosticFrames):0.,
             static_cast<unsigned long long>(diagnosticRenderRequested));
